@@ -673,7 +673,10 @@ def main():
     logging.basicConfig(level=logging.INFO)
     app = Application.builder().token(BOT_TOKEN).build()
     conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(main_menu_callback, pattern="^menu_")],
+        entry_points=[
+            CommandHandler("start", start),
+            CallbackQueryHandler(main_menu_callback, pattern="^menu_"),
+        ],
         states={
             CHECKIN_ROOM:          [CallbackQueryHandler(checkin_room, pattern="^ci_room_")],
             CHECKIN_GUEST:         [MessageHandler(filters.TEXT & ~filters.COMMAND, checkin_guest)],
