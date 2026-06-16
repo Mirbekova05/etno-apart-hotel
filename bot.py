@@ -102,7 +102,7 @@ def get_room_status(b):
         if s in ["Уборка", "Убран", "Отменён"]: return s
         if today < dt_in: return "Бронь"
         if dt_in <= today < dt_out: return "Занят"
-        if today >= dt_out: return "Уборка"
+        if today >= dt_out: return "Убран"
         return s
     except:
         return b.get("Статус", "")
