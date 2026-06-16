@@ -44,13 +44,19 @@ ROOMS = {
 
 # ===================== GOOGLE SHEETS =====================
 def get_sheet():
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, scope)
-    client = gspread.authorize(creds)
-    return client.open_by_key(SHEET_ID)
+    try:
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, scope)
+        client = gspread.authorize(creds)
+        return client.open_by_key(SHEET_ID)
+    except Exception as e:
+        logging.error(f"Google Sheets error: {e}")
+        return None
 
 def get_bookings_sheet():
     book = get_sheet()
+    if book is None:
+        return None
     try:
         return book.worksheet("Бронирования")
     except:
@@ -66,7 +72,12 @@ def get_bookings_sheet():
 
 def get_all_bookings():
     ws = get_bookings_sheet()
-    return ws.get_all_records()
+    if ws is None:
+        return []
+    try:
+        return ws.get_all_records()
+    except:
+        return []
 
 def find_active_booking(room_num):
     records = get_all_bookings()
