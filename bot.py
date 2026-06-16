@@ -1,4 +1,6 @@
 import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import logging
 from datetime import datetime, date
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -643,7 +645,20 @@ async def cleaning_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # ===================== ЗАПУСК =====================
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'OK')
+    def log_message(self, format, *args):
+        pass
+
+def run_health_server():
+    server = HTTPServer(('0.0.0.0', int(os.environ.get('PORT', 8080))), HealthHandler)
+    server.serve_forever()
+
 def main():
+    threading.Thread(target=run_health_server, daemon=True).start()
     logging.basicConfig(level=logging.INFO)
     app = Application.builder().token(BOT_TOKEN).build()
     conv = ConversationHandler(
@@ -681,3 +696,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# This code is already at the end, so we need to insert before main
