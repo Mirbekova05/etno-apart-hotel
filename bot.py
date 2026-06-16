@@ -39,6 +39,10 @@ ROOMS = {
     22: {"name": "№22 — 2к квартира",    "max": 4},
 }
 
+COLOR_GREEN = {"red": 0.57, "green": 0.82, "blue": 0.31}
+COLOR_BLUE  = {"red": 0.27, "green": 0.51, "blue": 0.96}
+COLOR_RED   = {"red": 0.96, "green": 0.27, "blue": 0.27}
+
 # ===== GOOGLE SHEETS =====
 def get_client():
     try:
@@ -47,11 +51,11 @@ def get_client():
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         google_creds = os.environ.get("GOOGLE_CREDS")
         if google_creds:
-            creds_dict = json.loads(google_creds)
-            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(google_creds), scope)
         else:
             creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, scope)
-        return gspread.authorize(creds)
+        import gspread as gs
+        return gs.authorize(creds)
     except Exception as e:
         logger.error(f"Auth error: {e}")
         return None
@@ -75,118 +79,13 @@ def get_ws():
             return book.worksheet("Бронирования")
         except:
             ws = book.add_worksheet("Бронирования", 1000, 17)
-            ws.append_row(["ID","Номер","Гость","Людей","Заезд","Выезд","Ночей","Цена/сутки","Итого","Задаток","Способ задатка","Доплата","Способ доплаты","Долг","Статус оплаты","Статус","Дата записи"])
+            ws.append_row(["ID","Номер","Гость","Людей","Заезд","Выезд","Ночей",
+                "Цена/сутки","Итого","Задаток","Способ задатка",
+                "Доплата","Способ доплаты","Долг","Статус оплаты","Статус","Дата записи"])
             return ws
     except Exception as e:
-        logger.error(f"Sheets error: {e}")
+        logger.error(f"WS error: {e}")
         return None
-
-def get_calendar_ws():
-    book = get_book()
-    if not book:
-        return None
-    try:
-        try:
-            return book.worksheet("Календарь")
-        except:
-            return create_calendar(book)
-    except Exception as e:
-        logger.error(f"Calendar error: {e}")
-        return None
-
-def create_calendar(book):
-    try:
-        ws = book.add_worksheet("Календарь", 30, 200)
-        # Даты с 16 июня по 31 августа 2026
-        start = date(2026, 6, 16)
-        end = date(2026, 8, 31)
-        dates = []
-        d = start
-        while d <= end:
-            dates.append(d)
-            d += timedelta(days=1)
-
-        # Заголовок - даты
-        header = ["Номер"] + [d.strftime("%d.%m") for d in dates]
-        ws.append_row(header)
-
-        # Номера
-        room_nums = [n for n in ROOMS if n != 14]
-        for num in room_nums:
-            ws.append_row([f"№{num}"] + [""] * len(dates))
-
-        return ws
-    except Exception as e:
-        logger.error(f"Create calendar error: {e}")
-        return None
-
-def update_calendar(guest, date_in_str, date_out_str):
-    try:
-        ws = get_calendar_ws()
-        if not ws:
-            return
-        
-        # Получаем заголовок с датами
-        header = ws.row_values(1)
-        
-        dt_in = datetime.strptime(date_in_str, "%d.%m.%Y").date()
-        dt_out = datetime.strptime(date_out_str, "%d.%m.%Y").date()
-        
-        # Находим строку номера
-        all_values = ws.get_all_values()
-        room_row = None
-        for i, row in enumerate(all_values):
-            if row and row[0] == f"№{guest['room']}":
-                room_row = i + 1
-                break
-        
-        if not room_row:
-            return
-
-        # Заполняем ячейки
-        updates = []
-        d = dt_in
-        while d < dt_out:
-            date_str = d.strftime("%d.%m")
-            if date_str in header:
-                col = header.index(date_str) + 1
-                updates.append({
-                    'range': ws.cell(room_row, col).address,
-                    'values': [[guest['guest']]]
-                })
-            d += timedelta(days=1)
-        
-        if updates:
-            for u in updates:
-                ws.update(u['range'], u['values'])
-    except Exception as e:
-        logger.error(f"Calendar update error: {e}")
-
-def clear_calendar(room, date_in_str, date_out_str):
-    try:
-        ws = get_calendar_ws()
-        if not ws:
-            return
-        header = ws.row_values(1)
-        dt_in = datetime.strptime(date_in_str, "%d.%m.%Y").date()
-        dt_out = datetime.strptime(date_out_str, "%d.%m.%Y").date()
-        all_values = ws.get_all_values()
-        room_row = None
-        for i, row in enumerate(all_values):
-            if row and row[0] == f"№{room}":
-                room_row = i + 1
-                break
-        if not room_row:
-            return
-        d = dt_in
-        while d < dt_out:
-            date_str = d.strftime("%d.%m")
-            if date_str in header:
-                col = header.index(date_str) + 1
-                ws.update_cell(room_row, col, "")
-            d += timedelta(days=1)
-    except Exception as e:
-        logger.error(f"Calendar clear error: {e}")
 
 def get_bookings():
     ws = get_ws()
@@ -197,27 +96,23 @@ def get_bookings():
     except:
         return []
 
-def get_room_status(booking):
-    """Определяем статус номера по датам"""
+def get_room_status(b):
     try:
         today = date.today()
-        dt_in = datetime.strptime(booking["Заезд"], "%d.%m.%Y").date()
-        dt_out = datetime.strptime(booking["Выезд"], "%d.%m.%Y").date()
-        status = booking.get("Статус", "")
-        
-        if status == "Уборка":
-            return "Уборка"
-        elif status == "Отменён":
-            return "Свободен"
-        elif today < dt_in:
+        dt_in = datetime.strptime(b["Заезд"], "%d.%m.%Y").date()
+        dt_out = datetime.strptime(b["Выезд"], "%d.%m.%Y").date()
+        s = b.get("Статус", "")
+        if s in ["Уборка", "Убран", "Отменён"]:
+            return s
+        if today < dt_in:
             return "Бронь"
-        elif dt_in <= today < dt_out:
+        if dt_in <= today < dt_out:
             return "Занят"
-        elif today >= dt_out:
+        if today >= dt_out:
             return "Уборка"
-        return status
+        return s
     except:
-        return booking.get("Статус", "")
+        return b.get("Статус", "")
 
 def find_booking(room_num):
     records = get_bookings()
@@ -231,20 +126,23 @@ def save_booking(data):
     if not ws:
         return
     bid = len(ws.get_all_records()) + 1
-    pay_status = "Оплачено ✅" if data["debt"] == 0 else "Долг ⚠️"
-    status = data.get("status", "Бронь")
+    pay_status = "Оплачено ✅" if data.get("debt", 0) == 0 else "Долг ⚠️"
     ws.append_row([bid, data["room"], data["guest"], data["people"],
-        data["date_in"], data["date_out"], data["nights"], data["price_day"],
-        data["total"], data["prepay"], data.get("prepay_method", "—"),
-        0, "—", data["debt"], pay_status, status,
+        data["date_in"], data["date_out"], data["nights"], data.get("price_day", 0),
+        data.get("total", 0), data.get("prepay", 0), data.get("prepay_method", "—"),
+        0, "—", data.get("debt", 0), pay_status, data.get("status", "Бронь"),
         datetime.now().strftime("%d.%m.%Y %H:%M")])
-    # Обновляем календарь
-    update_calendar(data, data["date_in"], data["date_out"])
+    update_calendar(data["room"], data["guest"], data["date_in"], data["date_out"], data.get("status", "Бронь"))
 
 def set_status(row, status):
     ws = get_ws()
     if ws:
         ws.update_cell(row, 16, status)
+
+def update_cell_ws(row, col, value):
+    ws = get_ws()
+    if ws:
+        ws.update_cell(row, col, value)
 
 def add_payment(row, booking, amount, method):
     ws = get_ws()
@@ -252,29 +150,144 @@ def add_payment(row, booking, amount, method):
         return 0
     new_extra = int(booking.get("Доплата", 0)) + amount
     new_debt = max(0, int(booking.get("Долг", 0)) - amount)
-    pay_status = "Оплачено ✅" if new_debt == 0 else "Долг ⚠️"
     ws.update_cell(row, 12, new_extra)
     ws.update_cell(row, 13, method)
     ws.update_cell(row, 14, new_debt)
-    ws.update_cell(row, 15, pay_status)
+    ws.update_cell(row, 15, "Оплачено ✅" if new_debt == 0 else "Долг ⚠️")
     return new_debt
+
+# ===== КАЛЕНДАРЬ (по 2 недели) =====
+CALENDAR_START = date(2026, 6, 16)
+CALENDAR_END   = date(2026, 8, 31)
+
+def get_calendar_sheets():
+    """Возвращает список (название листа, начало, конец) по 2 недели"""
+    sheets = []
+    d = CALENDAR_START
+    while d <= CALENDAR_END:
+        end = min(d + timedelta(days=13), CALENDAR_END)
+        name = f"{d.strftime('%d.%m')}—{end.strftime('%d.%m')}"
+        sheets.append((name, d, end))
+        d = end + timedelta(days=1)
+    return sheets
+
+def get_or_create_calendar_sheet(book, sheet_name, start, end):
+    try:
+        try:
+            ws = book.worksheet(sheet_name)
+            return ws
+        except:
+            pass
+        # Создаём новый лист
+        days = (end - start).days + 1
+        ws = book.add_worksheet(sheet_name, 25, days + 1)
+        # Заголовок
+        dates = [(start + timedelta(days=i)).strftime("%d.%m") for i in range(days)]
+        ws.append_row(["Номер"] + dates)
+        # Номера
+        room_nums = [n for n in ROOMS if n != 14]
+        rows = []
+        for num in room_nums:
+            rows.append([f"№{num}"] + [""] * days)
+        ws.append_rows(rows)
+        # Красим все ячейки зелёным
+        try:
+            last_col = chr(ord('A') + days)
+            ws.format(f"B2:{last_col}{len(room_nums)+1}", {"backgroundColor": COLOR_GREEN})
+        except:
+            pass
+        return ws
+    except Exception as e:
+        logger.error(f"Calendar sheet error: {e}")
+        return None
+
+def update_calendar(room, guest, date_in_str, date_out_str, status):
+    try:
+        book = get_book()
+        if not book:
+            return
+        dt_in = datetime.strptime(date_in_str, "%d.%m.%Y").date()
+        dt_out = datetime.strptime(date_out_str, "%d.%m.%Y").date()
+        color = COLOR_BLUE if status == "Бронь" else COLOR_RED
+        sheet_list = get_calendar_sheets()
+        for sheet_name, start, end in sheet_list:
+            if dt_out <= start or dt_in > end:
+                continue
+            ws = get_or_create_calendar_sheet(book, sheet_name, start, end)
+            if not ws:
+                continue
+            header = ws.row_values(1)
+            all_vals = ws.get_all_values()
+            room_row = None
+            for i, r in enumerate(all_vals):
+                if r and r[0] == f"№{room}":
+                    room_row = i + 1
+                    break
+            if not room_row:
+                continue
+            d = max(dt_in, start)
+            while d < dt_out and d <= end:
+                date_str = d.strftime("%d.%m")
+                if date_str in header:
+                    col = header.index(date_str) + 1
+                    ws.update_cell(room_row, col, guest)
+                    cell_addr = ws.cell(room_row, col).address
+                    ws.format(cell_addr, {"backgroundColor": color, "textFormat": {"bold": True}})
+                d += timedelta(days=1)
+    except Exception as e:
+        logger.error(f"update_calendar error: {e}")
+
+def clear_calendar(room, date_in_str, date_out_str):
+    try:
+        book = get_book()
+        if not book:
+            return
+        dt_in = datetime.strptime(date_in_str, "%d.%m.%Y").date()
+        dt_out = datetime.strptime(date_out_str, "%d.%m.%Y").date()
+        sheet_list = get_calendar_sheets()
+        for sheet_name, start, end in sheet_list:
+            if dt_out <= start or dt_in > end:
+                continue
+            try:
+                ws = book.worksheet(sheet_name)
+            except:
+                continue
+            header = ws.row_values(1)
+            all_vals = ws.get_all_values()
+            room_row = None
+            for i, r in enumerate(all_vals):
+                if r and r[0] == f"№{room}":
+                    room_row = i + 1
+                    break
+            if not room_row:
+                continue
+            d = max(dt_in, start)
+            while d < dt_out and d <= end:
+                date_str = d.strftime("%d.%m")
+                if date_str in header:
+                    col = header.index(date_str) + 1
+                    ws.update_cell(room_row, col, "")
+                    ws.format(ws.cell(room_row, col).address, {"backgroundColor": COLOR_GREEN})
+                d += timedelta(days=1)
+    except Exception as e:
+        logger.error(f"clear_calendar error: {e}")
 
 # ===== СОСТОЯНИЯ =====
 user_states = {}
 user_data = {}
 
 def get_state(uid): return user_states.get(uid, "menu")
-def set_state(uid, state): user_states[uid] = state
+def set_state(uid, s): user_states[uid] = s
 def get_data(uid): return user_data.get(uid, {})
-def update_data(uid, key, val):
+def update_data(uid, k, v):
     if uid not in user_data: user_data[uid] = {}
-    user_data[uid][key] = val
+    user_data[uid][k] = v
 def clear(uid):
     user_states.pop(uid, None)
     user_data.pop(uid, None)
 
 # ===== КЛАВИАТУРЫ =====
-def main_keyboard():
+def main_kb():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔵 Бронь", callback_data="book"),
          InlineKeyboardButton("✅ Заселить", callback_data="checkin")],
@@ -284,46 +297,10 @@ def main_keyboard():
          InlineKeyboardButton("🔴 Занятые", callback_data="occupied")],
         [InlineKeyboardButton("🔍 Инфо по номеру", callback_data="info"),
          InlineKeyboardButton("🧹 Уборка", callback_data="cleaning")],
+        [InlineKeyboardButton("✏️ Изменить данные", callback_data="edit")],
     ])
 
-def back_kb():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Меню", callback_data="menu")]])
-
-def free_rooms_kb(prefix):
-    bookings = get_bookings()
-    occupied = set()
-    for b in bookings:
-        s = get_room_status(b)
-        if s in ["Занят", "Бронь", "Уборка"]:
-            occupied.add(str(b["Номер"]))
-    kb = []
-    row = []
-    for num in ROOMS:
-        if num == 14: continue
-        if str(num) not in occupied:
-            row.append(InlineKeyboardButton(f"№{num}", callback_data=f"{prefix}_{num}"))
-            if len(row) == 4:
-                kb.append(row)
-                row = []
-    if row: kb.append(row)
-    kb.append([InlineKeyboardButton("◀️ Меню", callback_data="menu")])
-    return InlineKeyboardMarkup(kb)
-
-def active_rooms_kb(prefix, statuses=["Занят", "Бронь"]):
-    bookings = get_bookings()
-    kb = []
-    row = []
-    for b in bookings:
-        s = get_room_status(b)
-        if s in statuses:
-            icon = "🔴" if s == "Занят" else "🔵"
-            row.append(InlineKeyboardButton(f"{icon}№{b['Номер']}", callback_data=f"{prefix}_{b['Номер']}"))
-            if len(row) == 4:
-                kb.append(row)
-                row = []
-    if row: kb.append(row)
-    kb.append([InlineKeyboardButton("◀️ Меню", callback_data="menu")])
-    return InlineKeyboardMarkup(kb)
+def back_kb(): return InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Меню", callback_data="menu")]])
 
 def price_kb():
     return InlineKeyboardMarkup([
@@ -338,14 +315,76 @@ def pay_method_kb(prefix):
         InlineKeyboardButton("💳 Карта", callback_data=f"{prefix}_card"),
     ]])
 
-def status_icon(s):
-    return {"Занят": "🔴", "Бронь": "🔵", "Уборка": "🧹", "Убран": "🟢"}.get(s, "🟢")
+def rooms_kb(prefix, only_free=True):
+    bookings = get_bookings()
+    occupied = set()
+    for b in bookings:
+        s = get_room_status(b)
+        if s in ["Занят","Бронь","Уборка"]:
+            occupied.add(str(b["Номер"]))
+    kb = []
+    row = []
+    for num in ROOMS:
+        if num == 14: continue
+        if only_free and str(num) in occupied: continue
+        icon = ""
+        if not only_free:
+            s = None
+            for b in bookings:
+                if str(b["Номер"]) == str(num):
+                    s = get_room_status(b)
+                    break
+            icon = {"Занят":"🔴","Бронь":"🔵","Уборка":"🧹"}.get(s,"🟢")
+        row.append(InlineKeyboardButton(f"{icon}№{num}", callback_data=f"{prefix}_{num}"))
+        if len(row) == 4:
+            kb.append(row)
+            row = []
+    if row: kb.append(row)
+    kb.append([InlineKeyboardButton("◀️ Меню", callback_data="menu")])
+    return InlineKeyboardMarkup(kb)
+
+def active_rooms_kb(prefix):
+    bookings = get_bookings()
+    kb = []
+    row = []
+    for b in bookings:
+        s = get_room_status(b)
+        if s in ["Занят","Бронь","Уборка"]:
+            icon = {"Занят":"🔴","Бронь":"🔵","Уборка":"🧹"}.get(s,"")
+            row.append(InlineKeyboardButton(f"{icon}№{b['Номер']}", callback_data=f"{prefix}_{b['Номер']}"))
+            if len(row) == 4:
+                kb.append(row)
+                row = []
+    if row: kb.append(row)
+    kb.append([InlineKeyboardButton("◀️ Меню", callback_data="menu")])
+    return InlineKeyboardMarkup(kb)
+
+def edit_fields_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👤 Имя гостя", callback_data="ef_guest"),
+         InlineKeyboardButton("👥 Кол-во людей", callback_data="ef_people")],
+        [InlineKeyboardButton("📅 Дата заезда", callback_data="ef_date_in"),
+         InlineKeyboardButton("📅 Дата выезда", callback_data="ef_date_out")],
+        [InlineKeyboardButton("💰 Итоговая сумма", callback_data="ef_total"),
+         InlineKeyboardButton("✅ Задаток", callback_data="ef_prepay")],
+        [InlineKeyboardButton("🔄 Статус", callback_data="ef_status")],
+        [InlineKeyboardButton("◀️ Меню", callback_data="menu")],
+    ])
+
+def status_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔵 Бронь", callback_data="es_Бронь"),
+         InlineKeyboardButton("🔴 Занят", callback_data="es_Занят")],
+        [InlineKeyboardButton("🧹 Уборка", callback_data="es_Уборка"),
+         InlineKeyboardButton("✅ Убран", callback_data="es_Убран")],
+        [InlineKeyboardButton("◀️ Назад", callback_data="edit")],
+    ])
 
 # ===== ХЭНДЛЕРЫ =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     clear(uid)
-    await update.message.reply_text("🏠 *Управление квартирами*\n\nВыбери действие:", reply_markup=main_keyboard(), parse_mode="Markdown")
+    await update.message.reply_text("🏠 *Управление квартирами*\n\nВыбери действие:", reply_markup=main_kb(), parse_mode="Markdown")
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -353,29 +392,28 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = q.from_user.id
     d = q.data
 
+    # МЕНЮ
     if d == "menu":
         clear(uid)
-        await q.edit_message_text("🏠 *Управление квартирами*\n\nВыбери действие:", reply_markup=main_keyboard(), parse_mode="Markdown")
+        await q.edit_message_text("🏠 *Управление квартирами*\n\nВыбери действие:", reply_markup=main_kb(), parse_mode="Markdown")
 
+    # СВОБОДНЫЕ
     elif d == "free":
         bookings = get_bookings()
-        occupied = set()
-        for b in bookings:
-            s = get_room_status(b)
-            if s in ["Занят", "Бронь", "Уборка"]:
-                occupied.add(str(b["Номер"]))
+        occupied = {str(b["Номер"]) for b in bookings if get_room_status(b) in ["Занят","Бронь","Уборка"]}
         lines = [f"🟢 {info['name']}" for num, info in ROOMS.items() if num != 14 and str(num) not in occupied]
         text = ("🟢 *Свободные номера:*\n\n" + "\n".join(lines)) if lines else "❌ Все номера заняты"
         await q.edit_message_text(text, reply_markup=back_kb(), parse_mode="Markdown")
 
+    # ЗАНЯТЫЕ
     elif d == "occupied":
         bookings = get_bookings()
         lines = []
         for b in bookings:
             s = get_room_status(b)
-            if s in ["Занят", "Бронь", "Уборка"]:
-                icon = status_icon(s)
-                debt = int(b.get("Долг", 0))
+            if s in ["Занят","Бронь","Уборка"]:
+                icon = {"Занят":"🔴","Бронь":"🔵","Уборка":"🧹"}.get(s,"")
+                debt = int(b.get("Долг",0))
                 ds = f" | Долг: {debt:,} сом ⚠️" if debt > 0 else " | ✅ Оплачено"
                 lines.append(f"{icon} №{b['Номер']} — {b['Гость']} ({b['Людей']} чел.)\n    {b['Заезд']} → {b['Выезд']}{ds}")
         text = ("*Занятые и забронированные:*\n\n" + "\n\n".join(lines)) if lines else "✅ Все номера свободны!"
@@ -383,22 +421,19 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # БРОНЬ
     elif d == "book":
-        set_state(uid, "book_guest")
         user_data[uid] = {"status": "Бронь", "prepay": 0, "prepay_method": "—", "debt": 0, "price_day": 0, "total": 0, "nights": 0}
-        await q.edit_message_text("🔵 *Бронирование*\n\nВыбери номер:", reply_markup=free_rooms_kb("ci_room"), parse_mode="Markdown")
+        set_state(uid, "ci_guest")
+        await q.edit_message_text("🔵 *Бронирование*\n\nВыбери номер:", reply_markup=rooms_kb("ci_room"), parse_mode="Markdown")
 
     # ЗАСЕЛЕНИЕ
     elif d == "checkin":
-        set_state(uid, "ci_room")
         user_data[uid] = {"status": "Занят"}
-        await q.edit_message_text("✅ *Заселение*\n\nВыбери свободный номер:", reply_markup=free_rooms_kb("ci_room"), parse_mode="Markdown")
+        set_state(uid, "ci_guest")
+        await q.edit_message_text("✅ *Заселение*\n\nВыбери свободный номер:", reply_markup=rooms_kb("ci_room"), parse_mode="Markdown")
 
     elif d.startswith("ci_room_"):
         num = int(d.split("_")[-1])
         update_data(uid, "room", num)
-        state = get_state(uid)
-        if state == "book_guest":
-            pass
         set_state(uid, "ci_guest")
         await q.edit_message_text(f"*{ROOMS[num]['name']}*\n\nВведи имя гостя:", parse_mode="Markdown")
 
@@ -407,33 +442,26 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             set_state(uid, "ci_price_custom")
             await q.edit_message_text("✏️ Введи цену за сутки с 1 человека:")
         else:
-            price = int(d.split("_")[-1])
-            await calc_total(q, uid, price)
+            await calc_total(q, uid, int(d.split("_")[-1]))
 
     elif d == "ci_total_ok":
         data = get_data(uid)
         update_data(uid, "total", data["total_suggested"])
-        status = data.get("status", "Занят")
-        if status == "Бронь":
-            # Для брони сразу сохраняем без оплаты
+        if data.get("status") == "Бронь":
             data = get_data(uid)
             data["total"] = data["total_suggested"]
-            data["prepay"] = 0
-            data["prepay_method"] = "—"
             data["debt"] = data["total_suggested"]
             save_booking(data)
             clear(uid)
             await q.edit_message_text(
-                f"🔵 *Бронь оформлена!*\n\n"
-                f"🏠 {ROOMS[data['room']]['name']}\n"
+                f"🔵 *Бронь оформлена!*\n\n🏠 {ROOMS[data['room']]['name']}\n"
                 f"👤 {data['guest']} ({data['people']} чел.)\n"
                 f"📅 {data['date_in']} → {data['date_out']} ({data['nights']} н.)\n"
-                f"💰 Итого: *{data['total_suggested']:,} сом*\n"
-                f"⚠️ Оплата при заселении",
+                f"💰 Итого: *{data['total_suggested']:,} сом*\n⚠️ Оплата при заселении",
                 reply_markup=back_kb(), parse_mode="Markdown")
         else:
-            await q.edit_message_text(f"💰 Итого: *{data['total_suggested']:,} сом*\n\nСколько взял задаток?", parse_mode="Markdown")
             set_state(uid, "ci_prepay")
+            await q.edit_message_text(f"💰 Итого: *{data['total_suggested']:,} сом*\n\nСколько взял задаток?", parse_mode="Markdown")
 
     elif d == "ci_total_custom":
         set_state(uid, "ci_total_custom")
@@ -443,22 +471,17 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         method = "💵 Наличка" if d == "ci_prepay_cash" else "💳 Карта"
         data = get_data(uid)
         data["prepay_method"] = method
-        total = data["total"]
-        prepay = data["prepay"]
-        debt = max(0, total - prepay)
+        debt = max(0, data["total"] - data["prepay"])
         data["debt"] = debt
         save_booking(data)
         pay_text = "🎉 *Оплачено полностью!*" if debt == 0 else f"⚠️ *Долг: {debt:,} сом*"
         clear(uid)
         await q.edit_message_text(
-            f"✅ *Заселение оформлено!*\n\n"
-            f"🏠 {ROOMS[data['room']]['name']}\n"
+            f"✅ *Заселение оформлено!*\n\n🏠 {ROOMS[data['room']]['name']}\n"
             f"👤 {data['guest']} ({data['people']} чел.)\n"
             f"📅 {data['date_in']} → {data['date_out']} ({data['nights']} н.)\n"
-            f"━━━━━━━━━━━━\n"
-            f"💰 Итого: *{total:,} сом*\n"
-            f"✅ Задаток: *{prepay:,} сом* ({method})\n"
-            f"{pay_text}",
+            f"━━━━━━━━━━━━\n💰 Итого: *{data['total']:,} сом*\n"
+            f"✅ Задаток: *{data['prepay']:,} сом* ({method})\n{pay_text}",
             reply_markup=back_kb(), parse_mode="Markdown")
 
     # ВЫСЕЛЕНИЕ
@@ -472,9 +495,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             row = []
             for b in active:
                 row.append(InlineKeyboardButton(f"🔴№{b['Номер']}", callback_data=f"co_room_{b['Номер']}"))
-                if len(row) == 4:
-                    kb.append(row)
-                    row = []
+                if len(row) == 4: kb.append(row); row = []
             if row: kb.append(row)
             kb.append([InlineKeyboardButton("◀️ Меню", callback_data="menu")])
             await q.edit_message_text("🚪 *Выселение*\n\nВыбери номер:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
@@ -487,17 +508,14 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         update_data(uid, "co_row", row)
         update_data(uid, "co_booking", booking)
-        debt = int(booking.get("Долг", 0))
+        debt = int(booking.get("Долг",0))
         pay_text = f"⚠️ Долг: *{debt:,} сом*" if debt > 0 else "✅ Оплачено полностью"
         await q.edit_message_text(
-            f"🚪 *Выселение №{num}*\n\n"
-            f"👤 {booking['Гость']} ({booking['Людей']} чел.)\n"
-            f"📅 {booking['Заезд']} → {booking['Выезд']}\n"
-            f"━━━━━━━━━━━━\n"
+            f"🚪 *Выселение №{num}*\n\n👤 {booking['Гость']} ({booking['Людей']} чел.)\n"
+            f"📅 {booking['Заезд']} → {booking['Выезд']}\n━━━━━━━━━━━━\n"
             f"💰 Итого: *{int(booking['Итого']):,} сом*\n"
             f"✅ Задаток: *{int(booking['Задаток']):,} сом* ({booking.get('Способ задатка','—')})\n"
-            f"💳 Доплата: *{int(booking.get('Доплата',0)):,} сом*\n"
-            f"{pay_text}\n\nПодтвердить выселение?",
+            f"💳 Доплата: *{int(booking.get('Доплата',0)):,} сом*\n{pay_text}\n\nПодтвердить?",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("✅ Выселить", callback_data="co_confirm")],
                 [InlineKeyboardButton("◀️ Меню", callback_data="menu")]
@@ -505,12 +523,10 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif d == "co_confirm":
         data = get_data(uid)
-        set_status(data["co_row"], "Уборка")
         booking = data["co_booking"]
+        set_status(data["co_row"], "Уборка")
         clear(uid)
-        await q.edit_message_text(
-            f"✅ *№{booking['Номер']} выселен!*\n\n🧹 Нужна уборка!",
-            reply_markup=back_kb(), parse_mode="Markdown")
+        await q.edit_message_text(f"✅ *№{booking['Номер']} выселен!*\n\n🧹 Нужна уборка!", reply_markup=back_kb(), parse_mode="Markdown")
 
     # ИНФО
     elif d == "info":
@@ -518,18 +534,16 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status_map = {}
         for b in bookings:
             s = get_room_status(b)
-            if s not in ["Убран", "Свободен"]:
+            if s not in ["Убран","Отменён"]:
                 status_map[str(b["Номер"])] = s
         kb = []
         row = []
         for num in ROOMS:
             if num == 14: continue
-            s = status_map.get(str(num), "Свободен")
-            icon = status_icon(s)
+            s = status_map.get(str(num),"Свободен")
+            icon = {"Занят":"🔴","Бронь":"🔵","Уборка":"🧹"}.get(s,"🟢")
             row.append(InlineKeyboardButton(f"{icon}№{num}", callback_data=f"info_room_{num}"))
-            if len(row) == 4:
-                kb.append(row)
-                row = []
+            if len(row) == 4: kb.append(row); row = []
         if row: kb.append(row)
         kb.append([InlineKeyboardButton("◀️ Меню", callback_data="menu")])
         await q.edit_message_text("🔍 *Инфо по номеру*\n\n🟢 Своб  🔵 Бронь  🔴 Занят  🧹 Уборка",
@@ -540,8 +554,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _, booking = find_booking(num)
         if booking:
             s = get_room_status(booking)
-            icon = status_icon(s)
-            debt = int(booking.get("Долг", 0))
+            icon = {"Занят":"🔴","Бронь":"🔵","Уборка":"🧹"}.get(s,"🟢")
+            debt = int(booking.get("Долг",0))
             pay_text = "🎉 Оплачено!" if debt == 0 else f"⚠️ Долг: *{debt:,} сом*"
             text = (f"{icon} *{ROOMS[num]['name']}* — {s}\n\n"
                 f"👤 {booking['Гость']} ({booking['Людей']} чел.)\n"
@@ -566,9 +580,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             row = []
             for b in with_debt:
                 row.append(InlineKeyboardButton(f"№{b['Номер']} — {int(b['Долг']):,}с", callback_data=f"pay_room_{b['Номер']}"))
-                if len(row) == 2:
-                    kb.append(row)
-                    row = []
+                if len(row) == 2: kb.append(row); row = []
             if row: kb.append(row)
             kb.append([InlineKeyboardButton("◀️ Меню", callback_data="menu")])
             await q.edit_message_text("💰 *Принять оплату*\n\nНомера с долгом:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
@@ -580,7 +592,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update_data(uid, "pay_booking", booking)
         set_state(uid, "pay_amount")
         await q.edit_message_text(
-            f"💰 №{num} — {booking['Гость']}\n⚠️ Долг: *{int(booking['Долг']):,} сом*\n\nВведи сумму оплаты:",
+            f"💰 №{num} — {booking['Гость']}\n⚠️ Долг: *{int(booking['Долг']):,} сом*\n\nВведи сумму:",
             parse_mode="Markdown")
 
     elif d.startswith("pay_method_"):
@@ -589,8 +601,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_debt = add_payment(data["pay_row"], data["pay_booking"], data["pay_amount"], method)
         pay_text = "🎉 Долг погашен!" if new_debt == 0 else f"⚠️ Остаток: *{new_debt:,} сом*"
         clear(uid)
-        await q.edit_message_text(
-            f"✅ Оплата принята!\n💳 {data['pay_amount']:,} сом ({method})\n{pay_text}",
+        await q.edit_message_text(f"✅ Оплата принята!\n💳 {data['pay_amount']:,} сом ({method})\n{pay_text}",
             reply_markup=back_kb(), parse_mode="Markdown")
 
     # УБОРКА
@@ -604,9 +615,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             row = []
             for b in to_clean:
                 row.append(InlineKeyboardButton(f"🧹№{b['Номер']}", callback_data=f"clean_{b['Номер']}"))
-                if len(row) == 4:
-                    kb.append(row)
-                    row = []
+                if len(row) == 4: kb.append(row); row = []
             if row: kb.append(row)
             kb.append([InlineKeyboardButton("◀️ Меню", callback_data="menu")])
             await q.edit_message_text("🧹 *Нужна уборка:*", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
@@ -616,7 +625,60 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         row, booking = find_booking(num)
         if booking:
             set_status(row, "Убран")
+            clear_calendar(num, booking["Заезд"], booking["Выезд"])
         await q.edit_message_text(f"✅ *№{num} убран!*\n\n🟢 Готов к заселению.", reply_markup=back_kb(), parse_mode="Markdown")
+
+    # ИЗМЕНИТЬ ДАННЫЕ
+    elif d == "edit":
+        await q.edit_message_text("✏️ *Изменить данные*\n\nВыбери номер:", reply_markup=active_rooms_kb("edit_room"), parse_mode="Markdown")
+
+    elif d.startswith("edit_room_"):
+        num = int(d.split("_")[-1])
+        row, booking = find_booking(num)
+        if not booking:
+            await q.edit_message_text("Бронь не найдена.", reply_markup=back_kb())
+            return
+        update_data(uid, "edit_row", row)
+        update_data(uid, "edit_booking", booking)
+        update_data(uid, "edit_room", num)
+        s = get_room_status(booking)
+        icon = {"Занят":"🔴","Бронь":"🔵","Уборка":"🧹"}.get(s,"🟢")
+        await q.edit_message_text(
+            f"✏️ *{icon} №{num} — {booking['Гость']}*\n\n"
+            f"📅 {booking['Заезд']} → {booking['Выезд']}\n"
+            f"👥 {booking['Людей']} чел.\n"
+            f"💰 Итого: {int(booking['Итого']):,} сом\n\n"
+            f"Что хочешь изменить?",
+            reply_markup=edit_fields_kb(), parse_mode="Markdown")
+
+    elif d.startswith("ef_"):
+        field = d[3:]
+        field_names = {
+            "guest": "имя гостя",
+            "people": "количество людей",
+            "date_in": "дату заезда (формат: 19.06)",
+            "date_out": "дату выезда (формат: 21.06)",
+            "total": "итоговую сумму",
+            "prepay": "сумму задатка",
+        }
+        update_data(uid, "edit_field", field)
+        if field == "status":
+            set_state(uid, "edit_status")
+            await q.edit_message_text("🔄 Выбери новый статус:", reply_markup=status_kb())
+        else:
+            set_state(uid, "edit_value")
+            await q.edit_message_text(f"✏️ Введи новое {field_names.get(field, field)}:")
+
+    elif d.startswith("es_"):
+        new_status = d[3:]
+        data = get_data(uid)
+        row = data["edit_row"]
+        set_status(row, new_status)
+        booking = data["edit_booking"]
+        clear(uid)
+        await q.edit_message_text(
+            f"✅ Статус №{booking['Номер']} изменён на *{new_status}*",
+            reply_markup=back_kb(), parse_mode="Markdown")
 
 async def calc_total(q, uid, price_per_person):
     data = get_data(uid)
@@ -628,23 +690,21 @@ async def calc_total(q, uid, price_per_person):
     update_data(uid, "price_day", price_day)
     update_data(uid, "total_suggested", total)
     set_state(uid, "ci_total_confirm")
-    text = (f"💰 *Расчёт:*\n\n"
-        f"👥 {people} чел × {price_per_person:,} = *{price_day:,} сом/сутки*\n"
-        f"🌙 {nights} ночей\n"
-        f"━━━━━━━━━━━━\n"
-        f"💰 *Итого: {total:,} сом*\n\nВерно?")
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton(f"✅ Да — {total:,} сом", callback_data="ci_total_ok")],
         [InlineKeyboardButton("✏️ Другая сумма", callback_data="ci_total_custom")],
     ])
-    await q.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
+    await q.edit_message_text(
+        f"💰 *Расчёт:*\n\n👥 {people} чел × {price_per_person:,} = *{price_day:,} сом/сутки*\n"
+        f"🌙 {nights} ночей\n━━━━━━━━━━━━\n💰 *Итого: {total:,} сом*\n\nВерно?",
+        reply_markup=kb, parse_mode="Markdown")
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     state = get_state(uid)
     text = update.message.text.strip()
 
-    if state in ["ci_guest", "book_guest"]:
+    if state == "ci_guest":
         update_data(uid, "guest", text)
         set_state(uid, "ci_people")
         await update.message.reply_text("👥 Сколько человек?")
@@ -671,8 +731,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             t = text if len(text) > 5 else text + f".{date.today().year}"
             dt_out = datetime.strptime(t, "%d.%m.%Y")
-            data = get_data(uid)
-            dt_in = datetime.strptime(data["date_in"], "%d.%m.%Y")
+            dt_in = datetime.strptime(get_data(uid)["date_in"], "%d.%m.%Y")
             nights = (dt_out - dt_in).days
             if nights <= 0:
                 await update.message.reply_text("Дата выезда должна быть позже!")
@@ -680,16 +739,28 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update_data(uid, "date_out", dt_out.strftime("%d.%m.%Y"))
             update_data(uid, "nights", nights)
             set_state(uid, "ci_price")
-            await update.message.reply_text(
-                f"🌙 Ночей: *{nights}*\n\nЦена за сутки с 1 человека:",
-                reply_markup=price_kb(), parse_mode="Markdown")
+            await update.message.reply_text(f"🌙 Ночей: *{nights}*\n\nЦена за сутки с 1 человека:", reply_markup=price_kb(), parse_mode="Markdown")
         except:
             await update.message.reply_text("Неверный формат. Введи как: 21.06")
 
     elif state == "ci_price_custom":
         try:
             price = int(text.replace(" ","").replace(",",""))
-            await calc_total_msg(update, uid, price)
+            data = get_data(uid)
+            price_day = price * data["people"]
+            total = price_day * data["nights"]
+            update_data(uid, "price_per_person", price)
+            update_data(uid, "price_day", price_day)
+            update_data(uid, "total_suggested", total)
+            set_state(uid, "ci_total_confirm")
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"✅ Да — {total:,} сом", callback_data="ci_total_ok")],
+                [InlineKeyboardButton("✏️ Другая сумма", callback_data="ci_total_custom")],
+            ])
+            await update.message.reply_text(
+                f"💰 *Расчёт:*\n\n👥 {data['people']} чел × {price:,} = *{price_day:,} сом/сутки*\n"
+                f"🌙 {data['nights']} ночей\n━━━━━━━━━━━━\n💰 *Итого: {total:,} сом*\n\nВерно?",
+                reply_markup=kb, parse_mode="Markdown")
         except:
             await update.message.reply_text("Введи сумму числом")
 
@@ -699,17 +770,13 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update_data(uid, "total", total)
             data = get_data(uid)
             if data.get("status") == "Бронь":
-                data["prepay"] = 0
-                data["prepay_method"] = "—"
                 data["debt"] = total
                 save_booking(data)
                 clear(uid)
                 await update.message.reply_text(
-                    f"🔵 *Бронь оформлена!*\n\n"
-                    f"🏠 {ROOMS[data['room']]['name']}\n"
+                    f"🔵 *Бронь оформлена!*\n\n🏠 {ROOMS[data['room']]['name']}\n"
                     f"👤 {data['guest']} ({data['people']} чел.)\n"
-                    f"📅 {data['date_in']} → {data['date_out']}\n"
-                    f"💰 Итого: *{total:,} сом*",
+                    f"📅 {data['date_in']} → {data['date_out']}\n💰 Итого: *{total:,} сом*",
                     reply_markup=back_kb(), parse_mode="Markdown")
             else:
                 set_state(uid, "ci_prepay")
@@ -722,9 +789,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             prepay = int(text.replace(" ","").replace(",",""))
             update_data(uid, "prepay", prepay)
             set_state(uid, "ci_prepay_method")
-            await update.message.reply_text(
-                f"✅ Задаток: *{prepay:,} сом*\n\nКак оплатил?",
-                reply_markup=pay_method_kb("ci_prepay"), parse_mode="Markdown")
+            await update.message.reply_text(f"✅ Задаток: *{prepay:,} сом*\n\nКак оплатил?", reply_markup=pay_method_kb("ci_prepay"), parse_mode="Markdown")
         except:
             await update.message.reply_text("Введи сумму числом")
 
@@ -733,35 +798,52 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             amount = int(text.replace(" ","").replace(",",""))
             update_data(uid, "pay_amount", amount)
             set_state(uid, "pay_method")
-            await update.message.reply_text(
-                f"💳 Сумма: *{amount:,} сом*\n\nКак оплатил?",
-                reply_markup=pay_method_kb("pay_method"), parse_mode="Markdown")
+            await update.message.reply_text(f"💳 Сумма: *{amount:,} сом*\n\nКак оплатил?", reply_markup=pay_method_kb("pay_method"), parse_mode="Markdown")
         except:
             await update.message.reply_text("Введи сумму числом")
 
+    elif state == "edit_value":
+        data = get_data(uid)
+        field = data.get("edit_field")
+        row = data["edit_row"]
+        booking = data["edit_booking"]
+
+        col_map = {"guest": 3, "people": 4, "date_in": 5, "date_out": 6, "total": 9, "prepay": 10}
+        col = col_map.get(field)
+
+        try:
+            if field in ["total", "prepay"]:
+                val = int(text.replace(" ","").replace(",",""))
+            elif field == "people":
+                val = int(text)
+            elif field in ["date_in", "date_out"]:
+                t = text if len(text) > 5 else text + f".{date.today().year}"
+                datetime.strptime(t, "%d.%m.%Y")
+                val = t
+                # Обновляем календарь
+                clear_calendar(booking["Номер"], booking["Заезд"], booking["Выезд"])
+                new_date_in = val if field == "date_in" else booking["Заезд"]
+                new_date_out = val if field == "date_out" else booking["Выезд"]
+                update_calendar(booking["Номер"], booking["Гость"], new_date_in, new_date_out, get_room_status(booking))
+            else:
+                val = text
+                if field == "guest":
+                    clear_calendar(booking["Номер"], booking["Заезд"], booking["Выезд"])
+                    update_calendar(booking["Номер"], val, booking["Заезд"], booking["Выезд"], get_room_status(booking))
+
+            if col:
+                update_cell_ws(row, col, val)
+
+            field_names = {"guest":"Имя","people":"Людей","date_in":"Дата заезда","date_out":"Дата выезда","total":"Итого","prepay":"Задаток"}
+            clear(uid)
+            await update.message.reply_text(
+                f"✅ *{field_names.get(field, field)}* изменено на *{val}*",
+                reply_markup=back_kb(), parse_mode="Markdown")
+        except:
+            await update.message.reply_text("Неверный формат, попробуй ещё раз")
+
     else:
         await update.message.reply_text("🏠 Нажми /start")
-
-async def calc_total_msg(update, uid, price_per_person):
-    data = get_data(uid)
-    people = data["people"]
-    nights = data["nights"]
-    price_day = price_per_person * people
-    total = price_day * nights
-    update_data(uid, "price_per_person", price_per_person)
-    update_data(uid, "price_day", price_day)
-    update_data(uid, "total_suggested", total)
-    set_state(uid, "ci_total_confirm")
-    text = (f"💰 *Расчёт:*\n\n"
-        f"👥 {people} чел × {price_per_person:,} = *{price_day:,} сом/сутки*\n"
-        f"🌙 {nights} ночей\n"
-        f"━━━━━━━━━━━━\n"
-        f"💰 *Итого: {total:,} сом*\n\nВерно?")
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"✅ Да — {total:,} сом", callback_data="ci_total_ok")],
-        [InlineKeyboardButton("✏️ Другая сумма", callback_data="ci_total_custom")],
-    ])
-    await update.message.reply_text(text, reply_markup=kb, parse_mode="Markdown")
 
 # ===== ВЕБ СЕРВЕР =====
 class Health(BaseHTTPRequestHandler):
@@ -772,8 +854,7 @@ class Health(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
 def run_web():
-    port = int(os.environ.get("PORT", 8080))
-    HTTPServer(("0.0.0.0", port), Health).serve_forever()
+    HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 8080))), Health).serve_forever()
 
 def main():
     threading.Thread(target=run_web, daemon=True).start()
