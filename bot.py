@@ -11,7 +11,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 
 # ===================== НАСТРОЙКИ =====================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8915798465:AAGVK96P4Y9fnomCPQWWF1EFsHRHIDAEbnU")
-SHEET_ID = os.getenv("SHEET_ID", "1-4w9xWCFlptFQHgWIZB1AxM9GAUr1qocf62Vgb6vf7A")
+SHEET_ID = os.getenv("SHEET_ID", "1hLNcIosjOy_4sGw1hrYNFRHG7bmN4-V9JolaVtLyTME")
 CREDS_FILE = "credentials.json"
 
 # ===================== КОМНАТЫ =====================
