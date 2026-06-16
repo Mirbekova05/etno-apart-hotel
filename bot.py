@@ -43,9 +43,15 @@ ROOMS = {
 def get_ws():
     try:
         import gspread
+        import json
         from oauth2client.service_account import ServiceAccountCredentials
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, scope)
+        google_creds = os.environ.get("GOOGLE_CREDS")
+        if google_creds:
+            creds_dict = json.loads(google_creds)
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        else:
+            creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, scope)
         client = gspread.authorize(creds)
         book = client.open_by_key(SHEET_ID)
         try:
