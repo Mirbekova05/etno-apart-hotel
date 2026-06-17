@@ -179,15 +179,16 @@ def update_cell_ws(row, col, value):
     if ws:
         ws.update_cell(row, col, value)
 
-def cancel_booking(row, booking):
-    """Отмена брони: возврат задатка, обнуление сумм, статус Отменён"""
+def cancel_booking(row, booking, kept_amount=0):
+    """Отмена брони. kept_amount - сколько удержали (0 = полный возврат задатка)"""
     ws = get_ws()
     if not ws:
         return
-    ws.update_cell(row, 9, 0)   # Итого
+    ws.update_cell(row, 9, kept_amount)   # Итого = удержанная сумма
+    ws.update_cell(row, 10, kept_amount)  # Задаток = удержанная сумма
     ws.update_cell(row, 14, 0)  # Долг
-    ws.update_cell(row, 15, "Отменено")  # Статус оплаты
-    ws.update_cell(row, 16, STATUS_CANCELLED)  # Статус
+    ws.update_cell(row, 15, "Отменено" if kept_amount == 0 else "Отменено (частично)")
+    ws.update_cell(row, 16, STATUS_CANCELLED)
     clear_calendar(booking["Номер"], booking["Заезд"], booking["Выезд"])
 
 def add_payment(row, booking, amount, method):
@@ -949,15 +950,20 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_cancel_confirm(q, uid, num, row, booking)
         return
 
-    if d == "cancel_yes":
+    if d == "cancel_full_refund":
         data = get_data(uid)
         row = data["cancel_row"]
         booking = data["cancel_booking"]
-        cancel_booking(row, booking)
+        cancel_booking(row, booking, kept_amount=0)
         clear(uid)
         await q.edit_message_text(
-            f"❌ *Бронь №{booking['Номер']} отменена*\n\n👤 {booking['Гость']}\n💰 Задаток возвращён",
+            f"❌ *Бронь №{booking['Номер']} отменена*\n\n👤 {booking['Гость']}\n💰 Задаток возвращён полностью",
             reply_markup=back_kb(), parse_mode="Markdown")
+        return
+
+    if d == "cancel_partial":
+        set_state(uid, "cancel_kept_amount")
+        await q.edit_message_text("✂️ Введи сумму которую удерживаем (остальное возвращаем гостю):")
         return
 
 
@@ -1021,10 +1027,11 @@ async def show_cancel_confirm(q, uid, num, row, booking):
         f"👤 {booking['Гость']} ({booking['Людей']} чел.)\n"
         f"📅 {booking['Заезд']} → {booking['Выезд']}\n"
         f"💰 Итого: *{int(booking['Итого']):,} сом*\n"
-        f"✅ Задаток к возврату: *{prepay:,} сом*\n\n"
-        f"Подтвердить отмену? Сумма брони станет 0.",
+        f"✅ Задаток внесён: *{prepay:,} сом*\n\n"
+        f"Как поступаем с задатком?",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Да, отменить", callback_data="cancel_yes")],
+            [InlineKeyboardButton("✅ Вернуть полностью", callback_data="cancel_full_refund")],
+            [InlineKeyboardButton("✂️ Удержать часть", callback_data="cancel_partial")],
             [InlineKeyboardButton("◀️ Назад", callback_data="menu")]
         ]), parse_mode="Markdown")
 
@@ -1359,6 +1366,24 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             await update.message.reply_text("Неверный формат, попробуй ещё раз")
 
+    elif state == "cancel_kept_amount":
+        try:
+            kept = int(text.replace(" ", "").replace(",", ""))
+            data = get_data(uid)
+            row = data["cancel_row"]
+            booking = data["cancel_booking"]
+            cancel_booking(row, booking, kept_amount=kept)
+            returned = max(0, int(booking.get("Задаток", 0)) - kept)
+            clear(uid)
+            await update.message.reply_text(
+                f"❌ *Бронь №{booking['Номер']} отменена*\n\n"
+                f"👤 {booking['Гость']}\n"
+                f"✂️ Удержано: *{kept:,} сом*\n"
+                f"💰 Возвращено гостю: *{returned:,} сом*",
+                reply_markup=back_kb(), parse_mode="Markdown")
+        except Exception:
+            await update.message.reply_text("Введи сумму числом")
+
     else:
         await update.message.reply_text("🏠 Нажми /start")
 
@@ -1371,11 +1396,47 @@ class Health(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+def sync_statuses_daily():
+    """Раз в день проверяет все брони и обновляет реальный статус в таблице по датам"""
+    import time
+    while True:
+        try:
+            ws = get_ws()
+            if ws:
+                records = ws.get_all_records()
+                for i, r in enumerate(records):
+                    row = i + 2
+                    current_status = r.get("Статус", "")
+                    if current_status in [STATUS_CLEANED, STATUS_CANCELLED]:
+                        continue
+                    try:
+                        today = date.today()
+                        dt_in = datetime.strptime(r["Заезд"], "%d.%m.%Y").date()
+                        dt_out = datetime.strptime(r["Выезд"], "%d.%m.%Y").date()
+                        if today < dt_in:
+                            correct_status = STATUS_BOOKED
+                        elif dt_in <= today < dt_out:
+                            correct_status = STATUS_OCCUPIED
+                        else:
+                            correct_status = STATUS_CLEAN_NEEDED
+                        if current_status != correct_status:
+                            ws.update_cell(row, 16, correct_status)
+                            if correct_status == STATUS_OCCUPIED:
+                                update_calendar(r["Номер"], r["Гость"], r["Заезд"], r["Выезд"], STATUS_OCCUPIED)
+                            logger.info(f"Синхронизация: №{r['Номер']} {current_status} -> {correct_status}")
+                    except Exception as e:
+                        logger.error(f"Sync row error: {e}")
+            logger.info("Ежедневная синхронизация статусов завершена")
+        except Exception as e:
+            logger.error(f"sync_statuses_daily error: {e}")
+        time.sleep(86400)  # 24 часа
+
 def run_web():
     HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 8080))), Health).serve_forever()
 
 def main():
     threading.Thread(target=run_web, daemon=True).start()
+    threading.Thread(target=sync_statuses_daily, daemon=True).start()
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button))
