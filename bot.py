@@ -1597,7 +1597,7 @@ async def send_deposit_reminders(app):
             logger.error(f"deposit reminder error: {e}")
 
 def sync_statuses_daily():
-    """Раз в день проверяет все брони и обновляет реальный статус в таблице по датам"""
+    """При старте сразу синхронизирует, потом раз в сутки"""
     import time
     while True:
         try:
@@ -1623,10 +1623,12 @@ def sync_statuses_daily():
                             ws.update_cell(row, 16, correct_status)
                             if correct_status == STATUS_OCCUPIED:
                                 update_calendar(r["Номер"], r["Гость"], r["Заезд"], r["Выезд"], STATUS_OCCUPIED)
+                            elif correct_status == STATUS_CLEAN_NEEDED:
+                                clear_calendar(r["Номер"], r["Заезд"], r["Выезд"])
                             logger.info(f"Синхронизация: №{r['Номер']} {current_status} -> {correct_status}")
                     except Exception as e:
                         logger.error(f"Sync row error: {e}")
-            logger.info("Ежедневная синхронизация статусов завершена")
+            logger.info("Синхронизация статусов завершена")
         except Exception as e:
             logger.error(f"sync_statuses_daily error: {e}")
         time.sleep(86400)  # 24 часа
