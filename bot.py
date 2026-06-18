@@ -340,6 +340,23 @@ def price_kb():
         [InlineKeyboardButton("✏️ Своя цена", callback_data="ci_price_custom")],
     ])
 
+def all_rooms_kb(prefix):
+    """Показывает ВСЕ номера с вместимостью — занятость проверяется после ввода дат"""
+    kb = []
+    row = []
+    for num in ROOMS:
+        if num == 14:
+            continue
+        max_p = ROOMS[num]["max"]
+        row.append(InlineKeyboardButton(f"№{num} — {max_p} чел.", callback_data=f"{prefix}_{num}"))
+        if len(row) == 3:
+            kb.append(row)
+            row = []
+    if row:
+        kb.append(row)
+    kb.append([InlineKeyboardButton("◀️ Меню", callback_data="menu")])
+    return InlineKeyboardMarkup(kb)
+
 def free_rooms_kb(prefix):
     bookings = get_bookings()
     today = date.today()
@@ -456,8 +473,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ===== БРОНЬ =====
     if d == "book":
         user_data[uid] = {"status": STATUS_BOOKED}
-        set_state(uid, "ci_guest")
-        await q.edit_message_text("🔵 *Бронирование*\n\nВыбери номер:", reply_markup=free_rooms_kb("ci_room"), parse_mode="Markdown")
+        set_state(uid, "ci_room_selected")
+        await q.edit_message_text("🔵 *Бронирование*\n\nВыбери номер:", reply_markup=all_rooms_kb("ci_room"), parse_mode="Markdown")
         return
 
     # ===== ЗАСЕЛЕНИЕ =====
@@ -566,8 +583,17 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if d.startswith("ci_room_"):
         num = int(d.split("_")[-1])
         update_data(uid, "room", num)
-        set_state(uid, "ci_guest")
-        await q.edit_message_text(f"*{ROOMS[num]['name']}*\n\nВведи имя гостя:", parse_mode="Markdown")
+        data = get_data(uid)
+        if data.get("status") == STATUS_BOOKED:
+            # При брони — сначала спрашиваем даты, потом проверяем занятость
+            set_state(uid, "book_date_in")
+            await q.edit_message_text(
+                f"🔵 *{ROOMS[num]['name']}*\n\nДата заезда? (например: 19.06)",
+                parse_mode="Markdown")
+        else:
+            # При заселении — сразу имя
+            set_state(uid, "ci_guest")
+            await q.edit_message_text(f"*{ROOMS[num]['name']}*\n\nВведи имя гостя:", parse_mode="Markdown")
         return
 
     if d.startswith("ci_price_"):
@@ -828,13 +854,51 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("🧹 *Нужна уборка:*", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
         return
 
-    if d.startswith("clean_"):
+    if d.startswith("clean_") and not d.startswith("clean_done_") and not d.startswith("clean_skip_"):
+        num = int(d.split("_")[-1])
+        _, booking = find_booking(num)
+        if not booking:
+            await q.edit_message_text(f"Номер №{num} не найден.", reply_markup=back_kb())
+            return
+        await q.edit_message_text(
+            f"🧹 *№{num} — {booking['Гость']}*\n\nСтатус уборки?",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Убрано", callback_data=f"clean_done_{num}")],
+                [InlineKeyboardButton("❌ Не убрано", callback_data=f"clean_skip_{num}")],
+                [InlineKeyboardButton("◀️ Назад", callback_data="cleaning")],
+            ]), parse_mode="Markdown")
+        return
+
+    if d.startswith("clean_done_"):
         num = int(d.split("_")[-1])
         row, booking = find_booking(num)
         if booking:
             set_status(row, STATUS_CLEANED)
             clear_calendar(num, booking["Заезд"], booking["Выезд"])
-        await q.edit_message_text(f"✅ *№{num} убрано!*\n\n🟢 Готов к заселению.", reply_markup=back_kb(), parse_mode="Markdown")
+        # Показываем обновлённый список уборки
+        bookings = get_bookings()
+        to_clean = [b for b in bookings if get_room_status(b) == STATUS_CLEAN_NEEDED and str(b["Номер"]) != str(num)]
+        if not to_clean:
+            await q.edit_message_text("✅ *№{} убрано!*\n\n🎉 Все номера чистые!".format(num), reply_markup=back_kb(), parse_mode="Markdown")
+        else:
+            kb = []
+            row2 = []
+            for b in to_clean:
+                row2.append(InlineKeyboardButton(f"🧹№{b['Номер']} — {b['Гость']}", callback_data=f"clean_{b['Номер']}"))
+                if len(row2) == 2:
+                    kb.append(row2)
+                    row2 = []
+            if row2:
+                kb.append(row2)
+            kb.append([InlineKeyboardButton("◀️ Меню", callback_data="menu")])
+            await q.edit_message_text(f"✅ *№{num} убрано!*\n\n🧹 *Ещё нужна уборка:*", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+        return
+
+    if d.startswith("clean_skip_"):
+        num = int(d.split("_")[-1])
+        await q.edit_message_text(f"⏳ №{num} — отмечено как ещё не убрано.", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("◀️ К списку уборки", callback_data="cleaning")]
+        ]))
         return
 
     # ===== ИЗМЕНИТЬ =====
@@ -893,6 +957,38 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update_calendar(booking["Номер"], booking["Гость"], booking["Заезд"], booking["Выезд"], new_status)
         clear(uid)
         await q.edit_message_text(f"✅ Статус №{booking['Номер']} изменён на *{new_status}*", reply_markup=back_kb(), parse_mode="Markdown")
+        return
+
+    # ===== НАПОМИНАНИЯ О ЗАДАТКЕ =====
+    if d.startswith("remind_yes_"):
+        num = int(d.split("_")[-1])
+        row, booking = find_booking(num)
+        if not booking:
+            await q.edit_message_text("Бронь не найдена.", reply_markup=back_kb())
+            return
+        update_data(uid, "pay_row", row)
+        update_data(uid, "pay_booking", booking)
+        set_state(uid, "pay_amount")
+        await q.edit_message_text(
+            f"✅ №{num} — {booking['Гость']}\n\nСколько получили задатком?")
+        return
+
+    if d.startswith("remind_no_"):
+        num = d.split("_")[-1]
+        await q.edit_message_text(f"👍 Понял. Напомним завтра снова про №{num}.", reply_markup=back_kb())
+        return
+
+    if d.startswith("remind_cancel_"):
+        num = int(d.split("_")[-1])
+        all_b = find_all_bookings(num)
+        if not all_b:
+            await q.edit_message_text("Бронь не найдена.", reply_markup=back_kb())
+            return
+        row, booking = all_b[0]
+        cancel_booking(row, booking, kept_amount=0)
+        await q.edit_message_text(
+            f"❌ *Бронь №{num} отменена*\n\n👤 {booking['Гость']}",
+            reply_markup=back_kb(), parse_mode="Markdown")
         return
 
     # ===== ОТМЕНА БРОНИ =====
@@ -1177,7 +1273,74 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             await update.message.reply_text("Неверный формат. Введи как: 21.06")
 
-    # ===== ЗАСЕЛЕНИЕ/БРОНЬ =====
+    # ===== БРОНЬ — СНАЧАЛА ДАТЫ =====
+    if state == "book_date_in":
+        try:
+            t = text if len(text) > 5 else text + f".{date.today().year}"
+            dt = datetime.strptime(t, "%d.%m.%Y")
+            update_data(uid, "date_in", dt.strftime("%d.%m.%Y"))
+            set_state(uid, "book_date_out")
+            await update.message.reply_text("📅 Дата выезда? (например: 21.06)")
+        except Exception:
+            await update.message.reply_text("Неверный формат. Введи как: 19.06")
+
+    elif state == "book_date_out":
+        try:
+            t = text if len(text) > 5 else text + f".{date.today().year}"
+            dt_out = datetime.strptime(t, "%d.%m.%Y")
+            data = get_data(uid)
+            dt_in = datetime.strptime(data["date_in"], "%d.%m.%Y")
+            nights = (dt_out - dt_in).days
+            if nights <= 0:
+                await update.message.reply_text("Дата выезда должна быть позже!")
+                return
+            update_data(uid, "date_out", dt_out.strftime("%d.%m.%Y"))
+            update_data(uid, "nights", nights)
+            room_num = data["room"]
+            bookings = get_bookings()
+            if not is_room_free_for_dates(room_num, dt_in.date(), dt_out.date(), bookings):
+                # Ищем свободные альтернативы
+                alternatives = []
+                for num, info in ROOMS.items():
+                    if num == 14 or num == room_num:
+                        continue
+                    if is_room_free_for_dates(num, dt_in.date(), dt_out.date(), bookings):
+                        alternatives.append((num, info))
+                if alternatives:
+                    kb = []
+                    row = []
+                    alt_lines = []
+                    for num, info in alternatives:
+                        type_name = info["name"].split("— ")[1] if "— " in info["name"] else info["name"]
+                        alt_lines.append(f"🟢 №{num} — {type_name} (до {info['max']} чел.)")
+                        row.append(InlineKeyboardButton(f"№{num} — {info['max']} чел.", callback_data=f"ci_room_{num}"))
+                        if len(row) == 3:
+                            kb.append(row)
+                            row = []
+                    if row:
+                        kb.append(row)
+                    kb.append([InlineKeyboardButton("◀️ Меню", callback_data="menu")])
+                    await update.message.reply_text(
+                        f"❌ *№{room_num} занят* на {data['date_in']} → {dt_out.strftime('%d.%m.%Y')}!\n\n"
+                        f"✅ *Свободные варианты:*\n\n" + "\n".join(alt_lines) + "\n\nВыбери номер:",
+                        reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+                else:
+                    await update.message.reply_text(
+                        f"❌ *№{room_num} занят* на {data['date_in']} → {dt_out.strftime('%d.%m.%Y')}!\n\n"
+                        f"😔 На эти даты нет свободных номеров.",
+                        reply_markup=back_kb(), parse_mode="Markdown")
+                set_state(uid, "ci_room_selected")
+                return
+            # Свободен — переходим к имени гостя
+            set_state(uid, "ci_guest")
+            await update.message.reply_text(
+                f"✅ *№{room_num} свободен!*\n"
+                f"📅 {data['date_in']} → {dt_out.strftime('%d.%m.%Y')} ({nights} н.)\n\n"
+                f"Введи имя гостя:", parse_mode="Markdown")
+        except Exception:
+            await update.message.reply_text("Неверный формат. Введи как: 21.06")
+
+    # ===== ЗАСЕЛЕНИЕ/БРОНЬ — ИМЯ И ДАЛЕЕ =====
     elif state == "ci_guest":
         update_data(uid, "guest", text)
         set_state(uid, "ci_people")
@@ -1396,6 +1559,43 @@ class Health(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+ADMIN_ID = 489387868
+
+async def send_deposit_reminders(app):
+    """Каждый день в 11:00 — напоминание о бронях без задатка"""
+    import asyncio
+    while True:
+        try:
+            now = datetime.now()
+            # Считаем секунды до следующего 11:00
+            target = now.replace(hour=11, minute=0, second=0, microsecond=0)
+            if now >= target:
+                target = target + timedelta(days=1)
+            wait_seconds = (target - now).total_seconds()
+            await asyncio.sleep(wait_seconds)
+
+            # Ищем брони без задатка
+            bookings = get_bookings()
+            for b in bookings:
+                s = get_room_status(b)
+                if s == STATUS_BOOKED and int(b.get("Задаток", 0)) == 0:
+                    text = (
+                        f"⏰ *Напоминание о задатке!*\n\n"
+                        f"🏠 №{b['Номер']} — {b['Гость']}\n"
+                        f"📅 {b['Заезд']} → {b['Выезд']}\n"
+                        f"💰 Итого: {int(b['Итого']):,} сом\n"
+                        f"⚠️ Задаток не получен!\n\n"
+                        f"Гость отправил задаток?"
+                    )
+                    kb = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("✅ Да, получили", callback_data=f"remind_yes_{b['Номер']}"),
+                         InlineKeyboardButton("❌ Нет", callback_data=f"remind_no_{b['Номер']}")],
+                        [InlineKeyboardButton("🗑 Убрать бронь", callback_data=f"remind_cancel_{b['Номер']}")],
+                    ])
+                    await app.bot.send_message(ADMIN_ID, text, reply_markup=kb, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"deposit reminder error: {e}")
+
 def sync_statuses_daily():
     """Раз в день проверяет все брони и обновляет реальный статус в таблице по датам"""
     import time
@@ -1441,6 +1641,12 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+
+    async def post_init(application):
+        import asyncio
+        asyncio.create_task(send_deposit_reminders(application))
+
+    app.post_init = post_init
     print("Бот запущен!")
     app.run_polling(drop_pending_updates=True)
 
