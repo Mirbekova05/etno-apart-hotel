@@ -875,11 +875,17 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if booking:
             set_status(row, STATUS_CLEANED)
             clear_calendar(num, booking["Заезд"], booking["Выезд"])
-        # Показываем обновлённый список уборки
+        # Показываем обновлённый список — исключаем только что убранный номер
         bookings = get_bookings()
-        to_clean = [b for b in bookings if get_room_status(b) == STATUS_CLEAN_NEEDED and str(b["Номер"]) != str(num)]
+        to_clean = []
+        for b in bookings:
+            if str(b["Номер"]) == str(num):
+                continue  # пропускаем только что убранный
+            s = get_room_status(b)
+            if s == STATUS_CLEAN_NEEDED:
+                to_clean.append(b)
         if not to_clean:
-            await q.edit_message_text("✅ *№{} убрано!*\n\n🎉 Все номера чистые!".format(num), reply_markup=back_kb(), parse_mode="Markdown")
+            await q.edit_message_text(f"✅ *№{num} убрано!*\n\n🎉 Все номера чистые!", reply_markup=back_kb(), parse_mode="Markdown")
         else:
             kb = []
             row2 = []
