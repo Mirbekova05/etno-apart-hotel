@@ -179,28 +179,76 @@ def save_booking(data):
         datetime.now().strftime("%d.%m.%Y %H:%M")])
     update_calendar(data["room"], data["guest"], data["date_in"], data["date_out"], data.get("status", STATUS_BOOKED))
 
-def set_status(row, status):
+def set_status(row, status, booking=None):
+    """Меняет статус. Если передан booking - проверяет что row соответствует ему (защита от рассинхрона)."""
     ws = get_ws()
-    if ws:
-        try:
-            ws.update_cell(row, 16, status)
-            return True
-        except Exception as e:
-            logger.error(f"set_status error: {e}")
+    if not ws:
+        return False
+    try:
+        if booking is not None:
+            actual = ws.row_values(row)
+            if len(actual) >= 6 and (actual[2] != booking.get("Гость") or actual[4] != booking.get("Заезд")):
+                logger.warning(f"set_status: row {row} не совпадает с {booking.get('Гость')}, ищу точную строку")
+                exact_row = find_exact_row(booking)
+                if exact_row:
+                    row = exact_row
+                else:
+                    logger.error("set_status: не удалось найти точную строку")
+                    return False
+        ws.update_cell(row, 16, status)
+        check = ws.cell(row, 16).value
+        if check != status:
+            logger.error(f"set_status: запись не прошла! row={row} ожидали '{status}' получили '{check}'")
             return False
-    return False
+        logger.info(f"set_status: row={row} -> '{status}' OK")
+        return True
+    except Exception as e:
+        logger.error(f"set_status error: {e}")
+        return False
 
 def update_cell_ws(row, col, value):
     ws = get_ws()
     if ws:
         ws.update_cell(row, col, value)
 
+def find_exact_row(booking):
+    """Находит точный номер строки в таблице по уникальным данным брони (защита от рассинхрона индексов)"""
+    ws = get_ws()
+    if not ws:
+        return None
+    try:
+        all_records = ws.get_all_records()
+        for i, r in enumerate(all_records):
+            if (str(r.get("Номер")) == str(booking.get("Номер")) and
+                r.get("Гость") == booking.get("Гость") and
+                r.get("Заезд") == booking.get("Заезд") and
+                r.get("Выезд") == booking.get("Выезд")):
+                return i + 2
+    except Exception as e:
+        logger.error(f"find_exact_row error: {e}")
+    return None
+
 def cancel_booking(row, booking, kept_amount=0):
     """Отмена брони. kept_amount - сколько удержали (0 = полный возврат задатка)"""
     ws = get_ws()
     if not ws:
         logger.error("cancel_booking: не удалось получить worksheet")
-        return
+        return False
+    # Защита от рассинхрона: проверяем что row реально соответствует этой брони
+    try:
+        actual = ws.row_values(row)
+        # actual[2]=Гость(col3), actual[4]=Заезд(col5), actual[5]=Выезд(col6) — индексы с 0
+        if len(actual) >= 6 and (actual[2] != booking.get("Гость") or actual[4] != booking.get("Заезд")):
+            logger.warning(f"cancel_booking: row {row} не совпадает с брони {booking.get('Гость')}, ищу точную строку")
+            exact_row = find_exact_row(booking)
+            if exact_row:
+                row = exact_row
+            else:
+                logger.error("cancel_booking: не удалось найти точную строку брони")
+                return False
+    except Exception as e:
+        logger.error(f"cancel_booking row check error: {e}")
+
     logger.info(f"cancel_booking: row={row}, room={booking.get('Номер')}, guest={booking.get('Гость')}, kept={kept_amount}")
     ws.update_cell(row, 9, kept_amount)   # Итого = удержанная сумма
     ws.update_cell(row, 10, kept_amount)  # Задаток = удержанная сумма
@@ -211,9 +259,14 @@ def cancel_booking(row, booking, kept_amount=0):
     try:
         check = ws.cell(row, 16).value
         logger.info(f"cancel_booking: после записи статус в row={row} = '{check}'")
+        if check != STATUS_CANCELLED:
+            logger.error(f"cancel_booking: ЗАПИСЬ НЕ ПРОШЛА! Ожидали '{STATUS_CANCELLED}', получили '{check}'")
+            return False
     except Exception as e:
         logger.error(f"cancel_booking verify error: {e}")
+        return False
     clear_calendar(booking["Номер"], booking["Заезд"], booking["Выезд"])
+    return True
 
 def add_payment(row, booking, amount, method):
     """Принимает оплату: если бронь ещё без задатка - пишет в Задаток, иначе в Доплату. Возвращает новый долг."""
@@ -590,7 +643,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = get_data(uid)
         row = data["checkin_row"]
         booking = data["checkin_booking"]
-        set_status(row, STATUS_OCCUPIED)
+        set_status(row, STATUS_OCCUPIED, booking=booking)
         update_calendar(booking["Номер"], booking["Гость"], booking["Заезд"], booking["Выезд"], STATUS_OCCUPIED)
         clear(uid)
         await q.edit_message_text(
@@ -605,7 +658,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         booking = data["checkin_booking"]
         amount = data["checkin_pay_amount"]
         new_debt = add_payment(row, booking, amount, method)
-        set_status(row, STATUS_OCCUPIED)
+        set_status(row, STATUS_OCCUPIED, booking=booking)
         update_calendar(booking["Номер"], booking["Гость"], booking["Заезд"], booking["Выезд"], STATUS_OCCUPIED)
         pay_text = "🎉 Оплачено полностью!" if new_debt == 0 else f"⚠️ Остаток долга: *{new_debt:,} сом*"
         clear(uid)
@@ -756,9 +809,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if d.startswith("co_paymethod_"):
         method = "💵 Наличка" if d == "co_paymethod_cash" else "💳 Карта"
         data = get_data(uid)
-        new_debt = add_payment(data["co_row"], data["co_booking"], data["co_pay_amount"], method)
-        set_status(data["co_row"], STATUS_CLEAN_NEEDED)
         booking = data["co_booking"]
+        new_debt = add_payment(data["co_row"], booking, data["co_pay_amount"], method)
+        set_status(data["co_row"], STATUS_CLEAN_NEEDED, booking=booking)
         clear(uid)
         pay_text = "🎉 Долг погашен!" if new_debt == 0 else f"⚠️ Остаток: *{new_debt:,} сом*"
         await q.edit_message_text(
@@ -769,7 +822,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if d == "co_confirm":
         data = get_data(uid)
         booking = data["co_booking"]
-        set_status(data["co_row"], STATUS_CLEAN_NEEDED)
+        set_status(data["co_row"], STATUS_CLEAN_NEEDED, booking=booking)
         clear(uid)
         await q.edit_message_text(f"✅ *№{booking['Номер']} выселен!*\n\n🧹 Нужна уборка!", reply_markup=back_kb(), parse_mode="Markdown")
         return
@@ -907,8 +960,14 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         num = int(d.split("_")[-1])
         row, booking = find_booking_needing_cleaning(num)
         if booking:
-            set_status(row, STATUS_CLEANED)
-            clear_calendar(num, booking["Заезд"], booking["Выезд"])
+            success = set_status(row, STATUS_CLEANED, booking=booking)
+            if success:
+                clear_calendar(num, booking["Заезд"], booking["Выезд"])
+            else:
+                await q.edit_message_text(
+                    f"⚠️ *Не удалось обновить статус №{num}!*\n\nПопробуй ещё раз.",
+                    reply_markup=back_kb(), parse_mode="Markdown")
+                return
         # Показываем обновлённый список — исключаем только что убранный номер
         bookings = get_bookings()
         to_clean = []
@@ -991,8 +1050,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if d.startswith("es_"):
         new_status = d[3:]
         data = get_data(uid)
-        set_status(data["edit_row"], new_status)
         booking = data["edit_booking"]
+        set_status(data["edit_row"], new_status, booking=booking)
         if new_status in [STATUS_OCCUPIED, STATUS_BOOKED]:
             update_calendar(booking["Номер"], booking["Гость"], booking["Заезд"], booking["Выезд"], new_status)
         clear(uid)
@@ -1090,11 +1149,16 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = get_data(uid)
         row = data["cancel_row"]
         booking = data["cancel_booking"]
-        cancel_booking(row, booking, kept_amount=0)
+        success = cancel_booking(row, booking, kept_amount=0)
         clear(uid)
-        await q.edit_message_text(
-            f"❌ *Бронь №{booking['Номер']} отменена*\n\n👤 {booking['Гость']}\n💰 Задаток возвращён полностью",
-            reply_markup=back_kb(), parse_mode="Markdown")
+        if success:
+            await q.edit_message_text(
+                f"❌ *Бронь №{booking['Номер']} отменена*\n\n👤 {booking['Гость']}\n💰 Задаток возвращён полностью",
+                reply_markup=back_kb(), parse_mode="Markdown")
+        else:
+            await q.edit_message_text(
+                f"⚠️ *Не удалось отменить бронь!*\n\nПопробуй ещё раз через меню → Изменить данные → Статус → вручную поставь 'Отменён'.",
+                reply_markup=back_kb(), parse_mode="Markdown")
         return
 
     if d == "cancel_partial":
