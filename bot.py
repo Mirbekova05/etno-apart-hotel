@@ -43,11 +43,22 @@ COLOR_GREEN = {"red": 0.57, "green": 0.82, "blue": 0.31}
 COLOR_BLUE  = {"red": 0.27, "green": 0.51, "blue": 0.96}
 COLOR_RED   = {"red": 0.96, "green": 0.27, "blue": 0.27}
 
+def norm_status(s):
+    """Нормализует статус для надёжного сравнения: ё->е, обрезка пробелов, регистр"""
+    return str(s or "").strip().replace("ё", "е").replace("Ё", "Е").lower()
+
 STATUS_CLEAN_NEEDED = "Надо убрать"
 STATUS_CLEANED = "Убрано"
 STATUS_CANCELLED = "Отменён"
 STATUS_BOOKED = "Бронь"
 STATUS_OCCUPIED = "Занят"
+
+# Нормализованные версии для надёжного сравнения
+_N_CLEAN_NEEDED = norm_status(STATUS_CLEAN_NEEDED)
+_N_CLEANED = norm_status(STATUS_CLEANED)
+_N_CANCELLED = norm_status(STATUS_CANCELLED)
+_N_BOOKED = norm_status(STATUS_BOOKED)
+_N_OCCUPIED = norm_status(STATUS_OCCUPIED)
 
 # ===== GOOGLE SHEETS =====
 def get_client():
@@ -104,9 +115,14 @@ def get_bookings():
 def get_room_status(b):
     """Вычисляем текущий статус брони по датам, если статус не финальный"""
     try:
-        s = str(b.get("Статус", "")).strip()
-        if s in [STATUS_CLEAN_NEEDED, STATUS_CLEANED, STATUS_CANCELLED]:
-            return s
+        raw = str(b.get("Статус", "")).strip()
+        s = norm_status(raw)
+        if s == _N_CLEAN_NEEDED:
+            return STATUS_CLEAN_NEEDED
+        if s == _N_CLEANED:
+            return STATUS_CLEANED
+        if s == _N_CANCELLED or s.startswith(norm_status("Отменено")):
+            return STATUS_CANCELLED
         today = date.today()
         dt_in = datetime.strptime(b["Заезд"], "%d.%m.%Y").date()
         dt_out = datetime.strptime(b["Выезд"], "%d.%m.%Y").date()
@@ -116,7 +132,7 @@ def get_room_status(b):
             return STATUS_OCCUPIED
         if today >= dt_out:
             return STATUS_CLEAN_NEEDED
-        return s
+        return raw
     except Exception:
         return str(b.get("Статус", "")).strip()
 
@@ -124,8 +140,8 @@ def is_room_free_for_dates(room_num, d_in, d_out, bookings):
     for b in bookings:
         if str(b.get("Номер")) != str(room_num):
             continue
-        s = str(b.get("Статус", "")).strip()
-        if s in [STATUS_CLEANED, STATUS_CANCELLED, "Отменено", "Отменено (частично)"]:
+        s = norm_status(b.get("Статус", ""))
+        if s == _N_CLEANED or s == _N_CANCELLED or s.startswith(norm_status("Отменено")):
             continue
         try:
             b_in = datetime.strptime(b["Заезд"], "%d.%m.%Y").date()
@@ -142,8 +158,10 @@ def find_all_bookings(room_num):
     records = get_bookings()
     result = []
     for i, r in enumerate(records):
-        status_clean = str(r.get("Статус", "")).strip()
-        if str(r.get("Номер")) == str(room_num) and status_clean not in [STATUS_CLEANED, STATUS_CANCELLED]:
+        status_clean = norm_status(r.get("Статус", ""))
+        is_final_inactive = (status_clean == _N_CLEANED or status_clean == _N_CANCELLED or
+                             status_clean.startswith(norm_status("Отменено")))
+        if str(r.get("Номер")) == str(room_num) and not is_final_inactive:
             result.append((i + 2, r))
     try:
         result.sort(key=lambda x: datetime.strptime(x[1]["Заезд"], "%d.%m.%Y"))
@@ -1710,8 +1728,11 @@ def sync_statuses_daily():
                 records = ws.get_all_records()
                 for i, r in enumerate(records):
                     row = i + 2
-                    current_status = r.get("Статус", "")
-                    if current_status in [STATUS_CLEANED, STATUS_CANCELLED]:
+                    current_status_raw = r.get("Статус", "")
+                    current_status = norm_status(current_status_raw)
+                    is_final = (current_status == _N_CLEANED or current_status == _N_CANCELLED or
+                                current_status.startswith(norm_status("Отменено")))
+                    if is_final:
                         continue
                     try:
                         today = date.today()
@@ -1723,13 +1744,13 @@ def sync_statuses_daily():
                             correct_status = STATUS_OCCUPIED
                         else:
                             correct_status = STATUS_CLEAN_NEEDED
-                        if current_status != correct_status:
+                        if current_status_raw != correct_status:
                             ws.update_cell(row, 16, correct_status)
                             if correct_status == STATUS_OCCUPIED:
                                 update_calendar(r["Номер"], r["Гость"], r["Заезд"], r["Выезд"], STATUS_OCCUPIED)
                             elif correct_status == STATUS_CLEAN_NEEDED:
                                 clear_calendar(r["Номер"], r["Заезд"], r["Выезд"])
-                            logger.info(f"Синхронизация: №{r['Номер']} {current_status} -> {correct_status}")
+                            logger.info(f"Синхронизация: №{r['Номер']} {current_status_raw} -> {correct_status}")
                     except Exception as e:
                         logger.error(f"Sync row error: {e}")
             logger.info("Синхронизация статусов завершена")
