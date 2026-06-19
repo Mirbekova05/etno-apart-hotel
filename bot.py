@@ -104,7 +104,7 @@ def get_bookings():
 def get_room_status(b):
     """Вычисляем текущий статус брони по датам, если статус не финальный"""
     try:
-        s = b.get("Статус", "")
+        s = str(b.get("Статус", "")).strip()
         if s in [STATUS_CLEAN_NEEDED, STATUS_CLEANED, STATUS_CANCELLED]:
             return s
         today = date.today()
@@ -118,19 +118,20 @@ def get_room_status(b):
             return STATUS_CLEAN_NEEDED
         return s
     except Exception:
-        return b.get("Статус", "")
+        return str(b.get("Статус", "")).strip()
 
 def is_room_free_for_dates(room_num, d_in, d_out, bookings):
     for b in bookings:
         if str(b.get("Номер")) != str(room_num):
             continue
-        s = b.get("Статус", "")
-        if s in [STATUS_CLEANED, STATUS_CANCELLED]:
+        s = str(b.get("Статус", "")).strip()
+        if s in [STATUS_CLEANED, STATUS_CANCELLED, "Отменено", "Отменено (частично)"]:
             continue
         try:
             b_in = datetime.strptime(b["Заезд"], "%d.%m.%Y").date()
             b_out = datetime.strptime(b["Выезд"], "%d.%m.%Y").date()
             if d_in < b_out and d_out > b_in:
+                logger.info(f"is_room_free_for_dates: №{room_num} ЗАНЯТ — статус='{s}' гость='{b.get('Гость')}' {b_in}->{b_out}")
                 return False
         except Exception:
             pass
@@ -141,7 +142,8 @@ def find_all_bookings(room_num):
     records = get_bookings()
     result = []
     for i, r in enumerate(records):
-        if str(r.get("Номер")) == str(room_num) and r.get("Статус") not in [STATUS_CLEANED, STATUS_CANCELLED]:
+        status_clean = str(r.get("Статус", "")).strip()
+        if str(r.get("Номер")) == str(room_num) and status_clean not in [STATUS_CLEANED, STATUS_CANCELLED]:
             result.append((i + 2, r))
     try:
         result.sort(key=lambda x: datetime.strptime(x[1]["Заезд"], "%d.%m.%Y"))
@@ -154,6 +156,14 @@ def find_booking(room_num):
     all_b = find_all_bookings(room_num)
     if all_b:
         return all_b[0]
+    return None, None
+
+def find_booking_needing_cleaning(room_num):
+    """Находит конкретно бронь со статусом 'Надо убрать' для данного номера"""
+    all_b = find_all_bookings(room_num)
+    for row, b in all_b:
+        if get_room_status(b) == STATUS_CLEAN_NEEDED:
+            return row, b
     return None, None
 
 def save_booking(data):
@@ -172,7 +182,13 @@ def save_booking(data):
 def set_status(row, status):
     ws = get_ws()
     if ws:
-        ws.update_cell(row, 16, status)
+        try:
+            ws.update_cell(row, 16, status)
+            return True
+        except Exception as e:
+            logger.error(f"set_status error: {e}")
+            return False
+    return False
 
 def update_cell_ws(row, col, value):
     ws = get_ws()
@@ -183,25 +199,43 @@ def cancel_booking(row, booking, kept_amount=0):
     """Отмена брони. kept_amount - сколько удержали (0 = полный возврат задатка)"""
     ws = get_ws()
     if not ws:
+        logger.error("cancel_booking: не удалось получить worksheet")
         return
+    logger.info(f"cancel_booking: row={row}, room={booking.get('Номер')}, guest={booking.get('Гость')}, kept={kept_amount}")
     ws.update_cell(row, 9, kept_amount)   # Итого = удержанная сумма
     ws.update_cell(row, 10, kept_amount)  # Задаток = удержанная сумма
     ws.update_cell(row, 14, 0)  # Долг
     ws.update_cell(row, 15, "Отменено" if kept_amount == 0 else "Отменено (частично)")
     ws.update_cell(row, 16, STATUS_CANCELLED)
+    # Проверяем что записалось
+    try:
+        check = ws.cell(row, 16).value
+        logger.info(f"cancel_booking: после записи статус в row={row} = '{check}'")
+    except Exception as e:
+        logger.error(f"cancel_booking verify error: {e}")
     clear_calendar(booking["Номер"], booking["Заезд"], booking["Выезд"])
 
 def add_payment(row, booking, amount, method):
-    """Принимает оплату: уменьшает долг, увеличивает доплату. Возвращает новый долг."""
+    """Принимает оплату: если бронь ещё без задатка - пишет в Задаток, иначе в Доплату. Возвращает новый долг."""
     ws = get_ws()
     if not ws:
         return 0
     current_debt = int(booking.get("Долг", 0))
-    current_extra = int(booking.get("Доплата", 0))
-    new_extra = current_extra + amount
+    current_prepay = int(booking.get("Задаток", 0))
+    status = get_room_status(booking)
     new_debt = max(0, current_debt - amount)
-    ws.update_cell(row, 12, new_extra)
-    ws.update_cell(row, 13, method)
+
+    if status == STATUS_BOOKED and current_prepay == 0:
+        # Это первый платёж по брони без задатка — пишем как задаток
+        ws.update_cell(row, 10, amount)   # Задаток
+        ws.update_cell(row, 11, method)   # Способ задатка
+    else:
+        # Уже был задаток или уже заселены — пишем как доплату
+        current_extra = int(booking.get("Доплата", 0))
+        new_extra = current_extra + amount
+        ws.update_cell(row, 12, new_extra)  # Доплата
+        ws.update_cell(row, 13, method)     # Способ доплаты
+
     ws.update_cell(row, 14, new_debt)
     ws.update_cell(row, 15, "Оплачено ✅" if new_debt == 0 else "Долг ⚠️")
     return new_debt
@@ -856,9 +890,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if d.startswith("clean_") and not d.startswith("clean_done_") and not d.startswith("clean_skip_"):
         num = int(d.split("_")[-1])
-        _, booking = find_booking(num)
+        _, booking = find_booking_needing_cleaning(num)
         if not booking:
-            await q.edit_message_text(f"Номер №{num} не найден.", reply_markup=back_kb())
+            await q.edit_message_text(f"Номер №{num} не найден или уже убран.", reply_markup=back_kb())
             return
         await q.edit_message_text(
             f"🧹 *№{num} — {booking['Гость']}*\n\nСтатус уборки?",
@@ -871,7 +905,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if d.startswith("clean_done_"):
         num = int(d.split("_")[-1])
-        row, booking = find_booking(num)
+        row, booking = find_booking_needing_cleaning(num)
         if booking:
             set_status(row, STATUS_CLEANED)
             clear_calendar(num, booking["Заезд"], booking["Выезд"])
