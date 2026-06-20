@@ -52,6 +52,7 @@ STATUS_CLEANED = "Убрано"
 STATUS_CANCELLED = "Отменён"
 STATUS_BOOKED = "Бронь"
 STATUS_OCCUPIED = "Занят"
+STATUS_FREE = "Свободен"
 
 # Нормализованные версии для надёжного сравнения
 _N_CLEAN_NEEDED = norm_status(STATUS_CLEAN_NEEDED)
@@ -59,6 +60,7 @@ _N_CLEANED = norm_status(STATUS_CLEANED)
 _N_CANCELLED = norm_status(STATUS_CANCELLED)
 _N_BOOKED = norm_status(STATUS_BOOKED)
 _N_OCCUPIED = norm_status(STATUS_OCCUPIED)
+_N_FREE = norm_status(STATUS_FREE)
 
 # ===== GOOGLE SHEETS =====
 def get_client():
@@ -115,14 +117,14 @@ def get_cleaning_ws():
             ws = book.add_worksheet("Уборка", 30, 3)
             ws.append_row(["Номер", "Статус уборки", "Обновлено"])
             room_nums = sorted([n for n in ROOMS if n != 14])
-            ws.append_rows([[n, STATUS_CLEANED, ""] for n in room_nums])
+            ws.append_rows([[n, STATUS_CLEAN_NEEDED, ""] for n in room_nums])
             return ws
         # Если лист уже есть, но в нём не все номера — докидываем недостающие
         existing = ws.col_values(1)[1:]  # пропускаем заголовок
         existing_nums = set(str(x).strip() for x in existing if x)
         missing = [n for n in ROOMS if n != 14 and str(n) not in existing_nums]
         if missing:
-            ws.append_rows([[n, STATUS_CLEANED, ""] for n in sorted(missing)])
+            ws.append_rows([[n, STATUS_CLEAN_NEEDED, ""] for n in sorted(missing)])
         return ws
     except Exception as e:
         logger.error(f"get_cleaning_ws error: {e}")
@@ -194,16 +196,15 @@ def get_bookings():
         return []
 
 def get_room_status(b):
-    """Вычисляем текущий статус брони по датам, если статус не финальный.
-    Если дата выезда прошла — статус 'Надо убрать' ТОЛЬКО если комната физически не убрана
-    (проверяем отдельный лист Уборка, чтобы не зависеть от множества строк-броней)."""
+    """Вычисляем текущий статус брони по датам.
+    В листе 'Бронирования' статус теперь только: Бронь / Занят / Свободен.
+    Когда выезд прошёл - сразу 'Свободен' (физическая уборка живёт в отдельном листе)."""
     try:
         raw = str(b.get("Статус", "")).strip()
         s = norm_status(raw)
-        if s == _N_CLEAN_NEEDED:
-            return STATUS_CLEAN_NEEDED
-        if s == _N_CLEANED:
-            return STATUS_CLEANED
+        # Поддержка старых записей с прежними статусами (на случай если остались в таблице)
+        if s == _N_CLEAN_NEEDED or s == _N_CLEANED:
+            return STATUS_FREE
         if s == _N_CANCELLED or s.startswith(norm_status("Отменено")):
             return STATUS_CANCELLED
         today = date.today()
@@ -214,7 +215,7 @@ def get_room_status(b):
         if dt_in <= today < dt_out:
             return STATUS_OCCUPIED
         if today >= dt_out:
-            return STATUS_CLEAN_NEEDED
+            return STATUS_FREE
         return raw
     except Exception:
         return str(b.get("Статус", "")).strip()
@@ -264,10 +265,11 @@ def find_booking(room_num):
     return None, None
 
 def find_booking_needing_cleaning(room_num):
-    """Находит конкретно бронь со статусом 'Надо убрать' для данного номера"""
+    """Находит последнюю бронь со статусом 'Свободен' (выезд прошёл) для данного номера —
+    используется чтобы знать какого гостя/даты очистить в календаре после уборки."""
     all_b = find_all_bookings(room_num)
     for row, b in all_b:
-        if get_room_status(b) == STATUS_CLEAN_NEEDED:
+        if get_room_status(b) == STATUS_FREE:
             return row, b
     return None, None
 
@@ -506,7 +508,8 @@ def clear(uid):
     user_data.pop(uid, None)
 
 def icon_for(s):
-    return {STATUS_OCCUPIED: "🔴", STATUS_BOOKED: "🔵", STATUS_CLEAN_NEEDED: "🧹", STATUS_CLEANED: "🟢"}.get(s, "🟢")
+    return {STATUS_OCCUPIED: "🔴", STATUS_BOOKED: "🔵", STATUS_CLEAN_NEEDED: "🧹",
+            STATUS_CLEANED: "🟢", STATUS_FREE: "⬜"}.get(s, "🟢")
 
 # ===== КЛАВИАТУРЫ =====
 def main_kb():
@@ -553,7 +556,7 @@ def free_rooms_kb(prefix):
     occupied = set()
     for b in bookings:
         s = get_room_status(b)
-        if s in [STATUS_OCCUPIED, STATUS_CLEAN_NEEDED]:
+        if s == STATUS_OCCUPIED:
             occupied.add(str(b["Номер"]))
         elif s == STATUS_BOOKED:
             try:
@@ -583,7 +586,7 @@ def active_rooms_kb(prefix):
     row = []
     for b in bookings:
         s = get_room_status(b)
-        if s in [STATUS_OCCUPIED, STATUS_BOOKED, STATUS_CLEAN_NEEDED]:
+        if s in [STATUS_OCCUPIED, STATUS_BOOKED]:
             num = str(b["Номер"])
             if num in seen:
                 continue
@@ -632,8 +635,7 @@ def status_kb():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔵 Бронь", callback_data=f"es_{STATUS_BOOKED}"),
          InlineKeyboardButton("🔴 Занят", callback_data=f"es_{STATUS_OCCUPIED}")],
-        [InlineKeyboardButton("🧹 Надо убрать", callback_data=f"es_{STATUS_CLEAN_NEEDED}"),
-         InlineKeyboardButton("✅ Убрано", callback_data=f"es_{STATUS_CLEANED}")],
+        [InlineKeyboardButton("⬜ Свободен", callback_data=f"es_{STATUS_FREE}")],
         [InlineKeyboardButton("◀️ Назад", callback_data="edit")],
     ])
 
@@ -642,6 +644,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     clear(uid)
     await update.message.reply_text("🏠 *Управление квартирами*\n\nВыбери действие:", reply_markup=main_kb(), parse_mode="Markdown")
+
+async def reset_cleaning_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Разовая команда: ставит ВСЕМ номерам в листе Уборка статус 'Надо убрать' —
+    чтобы можно было самостоятельно проверить каждый и отметить вручную."""
+    ws = get_cleaning_ws()
+    if not ws:
+        await update.message.reply_text("⚠️ Не удалось открыть лист Уборка.")
+        return
+    try:
+        records = ws.get_all_records()
+        count = 0
+        for i, r in enumerate(records):
+            row = i + 2
+            ws.update_cell(row, 2, STATUS_CLEAN_NEEDED)
+            count += 1
+        await update.message.reply_text(f"✅ Все {count} номеров в листе «Уборка» теперь «Надо убрать». Проверь каждый сама через кнопку 🧹 Уборка.")
+    except Exception as e:
+        logger.error(f"reset_cleaning_cmd error: {e}")
+        await update.message.reply_text(f"⚠️ Ошибка: {e}")
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -915,7 +936,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = get_data(uid)
         booking = data["co_booking"]
         new_debt = add_payment(data["co_row"], booking, data["co_pay_amount"], method)
-        set_status(data["co_row"], STATUS_CLEAN_NEEDED, booking=booking)
+        set_status(data["co_row"], STATUS_FREE, booking=booking)
+        set_cleaning_status(booking["Номер"], STATUS_CLEAN_NEEDED)
         clear(uid)
         pay_text = "🎉 Долг погашен!" if new_debt == 0 else f"⚠️ Остаток: *{new_debt:,} сом*"
         await q.edit_message_text(
@@ -926,7 +948,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if d == "co_confirm":
         data = get_data(uid)
         booking = data["co_booking"]
-        set_status(data["co_row"], STATUS_CLEAN_NEEDED, booking=booking)
+        set_status(data["co_row"], STATUS_FREE, booking=booking)
+        set_cleaning_status(booking["Номер"], STATUS_CLEAN_NEEDED)
         clear(uid)
         await q.edit_message_text(f"✅ *№{booking['Номер']} выселен!*\n\n🧹 Нужна уборка!", reply_markup=back_kb(), parse_mode="Markdown")
         return
@@ -1027,30 +1050,31 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ===== УБОРКА =====
     if d == "cleaning":
-        bookings = get_bookings()
         cleaning_statuses = get_all_cleaning_statuses()
-        # Номер нужно убрать если: есть бронь с прошедшим выездом И лист уборки говорит "не убрано"
-        rooms_with_past_checkout = {}
-        for b in bookings:
-            s = get_room_status(b)
-            if s == STATUS_CLEAN_NEEDED:
-                num = str(b["Номер"])
-                rooms_with_past_checkout[num] = b  # последний гость, выехавший из этого номера
-
-        to_clean = []
-        for num, b in rooms_with_past_checkout.items():
-            cleaning_status = cleaning_statuses.get(num, STATUS_CLEANED)
-            logger.info(f"cleaning menu check: №{num} гость='{b['Гость']}' лист_уборки='{cleaning_status}'")
-            if cleaning_status == STATUS_CLEAN_NEEDED:
-                to_clean.append(b)
-
-        if not to_clean:
+        nums_needing = [num for num, st in cleaning_statuses.items() if st == STATUS_CLEAN_NEEDED]
+        if not nums_needing:
             await q.edit_message_text("✅ Все номера чистые!", reply_markup=back_kb())
             return
+
+        # Для каждого номера найдём последнего гостя (для подписи в кнопке), если есть
+        bookings = get_bookings()
+        last_guest = {}
+        for b in bookings:
+            num = str(b["Номер"])
+            if num in nums_needing:
+                try:
+                    dt_out = datetime.strptime(b["Выезд"], "%d.%m.%Y").date()
+                except Exception:
+                    continue
+                if num not in last_guest or dt_out > last_guest[num][1]:
+                    last_guest[num] = (b["Гость"], dt_out)
+
         kb = []
         row = []
-        for b in to_clean:
-            row.append(InlineKeyboardButton(f"🧹№{b['Номер']} — {b['Гость']}", callback_data=f"clean_{b['Номер']}"))
+        for num in sorted(nums_needing, key=lambda x: int(x)):
+            guest_name = last_guest.get(num, ("",))[0]
+            label = f"🧹№{num}" + (f" — {guest_name}" if guest_name else "")
+            row.append(InlineKeyboardButton(label, callback_data=f"clean_{num}"))
             if len(row) == 2:
                 kb.append(row)
                 row = []
@@ -1089,26 +1113,30 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if last_booking:
             clear_calendar(num, last_booking["Заезд"], last_booking["Выезд"])
 
-        # Показываем обновлённый список — заново читаем лист уборки
-        bookings = get_bookings()
+        # Показываем обновлённый список — заново читаем лист уборки (источник истины)
         cleaning_statuses = get_all_cleaning_statuses()
-        rooms_with_past_checkout = {}
-        for b in bookings:
-            s = get_room_status(b)
-            if s == STATUS_CLEAN_NEEDED:
-                rooms_with_past_checkout[str(b["Номер"])] = b
-        to_clean = []
-        for rn, b in rooms_with_past_checkout.items():
-            if cleaning_statuses.get(rn, STATUS_CLEANED) == STATUS_CLEAN_NEEDED:
-                to_clean.append(b)
+        nums_needing = [n for n, st in cleaning_statuses.items() if st == STATUS_CLEAN_NEEDED]
 
-        if not to_clean:
+        if not nums_needing:
             await q.edit_message_text(f"✅ *№{num} убрано!*\n\n🎉 Все номера чистые!", reply_markup=back_kb(), parse_mode="Markdown")
         else:
+            bookings = get_bookings()
+            last_guest = {}
+            for b in bookings:
+                bn = str(b["Номер"])
+                if bn in nums_needing:
+                    try:
+                        dt_out = datetime.strptime(b["Выезд"], "%d.%m.%Y").date()
+                    except Exception:
+                        continue
+                    if bn not in last_guest or dt_out > last_guest[bn][1]:
+                        last_guest[bn] = (b["Гость"], dt_out)
             kb = []
             row2 = []
-            for b in to_clean:
-                row2.append(InlineKeyboardButton(f"🧹№{b['Номер']} — {b['Гость']}", callback_data=f"clean_{b['Номер']}"))
+            for n in sorted(nums_needing, key=lambda x: int(x)):
+                guest_name = last_guest.get(n, ("",))[0]
+                label = f"🧹№{n}" + (f" — {guest_name}" if guest_name else "")
+                row2.append(InlineKeyboardButton(label, callback_data=f"clean_{n}"))
                 if len(row2) == 2:
                     kb.append(row2)
                     row2 = []
@@ -1400,9 +1428,11 @@ async def show_info_list(q):
     for b in bookings:
         s = get_room_status(b)
         n = str(b["Номер"])
-        if s == STATUS_CLEAN_NEEDED:
-            # Источник истины по уборке — отдельный лист
-            s = cleaning_statuses.get(n, STATUS_CLEAN_NEEDED)
+        if s == STATUS_FREE:
+            # Если выезд прошёл, смотрим — может быть номер ещё не убран
+            s = cleaning_statuses.get(n, STATUS_CLEANED)
+            if s == STATUS_CLEANED:
+                continue  # действительно свободен и чист — не считаем активным статусом
         if s not in [STATUS_CLEANED, STATUS_CANCELLED]:
             if n not in status_map:
                 status_map[n] = s
@@ -1412,7 +1442,7 @@ async def show_info_list(q):
     for num, info in ROOMS.items():
         if num == 14:
             continue
-        s = status_map.get(str(num), "Свободен")
+        s = status_map.get(str(num), STATUS_FREE)
         icon = icon_for(s)
         type_name = info["name"].split("— ")[1] if "— " in info["name"] else info["name"]
         lines.append(f"{icon} №{num} — {type_name}")
@@ -1900,7 +1930,7 @@ def sync_statuses_daily():
                         elif dt_in <= today < dt_out:
                             correct_status = STATUS_OCCUPIED
                         else:
-                            correct_status = STATUS_CLEAN_NEEDED
+                            correct_status = STATUS_FREE
 
                         if current_status_raw != correct_status:
                             # Доп. проверка прямо перед записью — перечитываем именно эту ячейку
@@ -1914,7 +1944,7 @@ def sync_statuses_daily():
                             ws.update_cell(row, 16, correct_status)
                             if correct_status == STATUS_OCCUPIED:
                                 update_calendar(r["Номер"], r["Гость"], r["Заезд"], r["Выезд"], STATUS_OCCUPIED)
-                            elif correct_status == STATUS_CLEAN_NEEDED:
+                            elif correct_status == STATUS_FREE:
                                 clear_calendar(r["Номер"], r["Заезд"], r["Выезд"])
                                 set_cleaning_status(r["Номер"], STATUS_CLEAN_NEEDED)
                             logger.info(f"Синхронизация: row={row} №{r['Номер']} '{current_status_raw}' -> '{correct_status}'")
@@ -1933,6 +1963,7 @@ def main():
     threading.Thread(target=sync_statuses_daily, daemon=True).start()
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("resetcleaning", reset_cleaning_cmd))
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
