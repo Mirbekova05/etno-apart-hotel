@@ -47,6 +47,15 @@ def norm_status(s):
     """Нормализует статус для надёжного сравнения: ё->е, обрезка пробелов, регистр"""
     return str(s or "").strip().replace("ё", "е").replace("Ё", "Е").lower()
 
+def is_cancelled_text(s):
+    """Максимально надёжная проверка на 'отменено/отменён' — просто ищет корень слова,
+    не зависит от формы, регистра, буквы ё/е."""
+    return "тмен" in str(s or "").lower()
+
+def is_cleaned_text(s):
+    """Проверка на статус 'Убрано' в листе уборки."""
+    return norm_status(s) == norm_status("Убрано")
+
 STATUS_CLEAN_NEEDED = "Надо убрать"
 STATUS_CLEANED = "Убрано"
 STATUS_CANCELLED = "Отменён"
@@ -201,12 +210,11 @@ def get_room_status(b):
     Когда выезд прошёл - сразу 'Свободен' (физическая уборка живёт в отдельном листе)."""
     try:
         raw = str(b.get("Статус", "")).strip()
-        s = norm_status(raw)
-        # Поддержка старых записей с прежними статусами (на случай если остались в таблице)
-        if s == _N_CLEAN_NEEDED or s == _N_CLEANED:
-            return STATUS_FREE
-        if s == _N_CANCELLED or s.startswith(norm_status("Отменено")):
+        pay_raw = str(b.get("Статус оплаты", "")).strip()
+        if is_cancelled_text(raw) or is_cancelled_text(pay_raw):
             return STATUS_CANCELLED
+        if is_cleaned_text(raw):
+            return STATUS_FREE
         today = date.today()
         dt_in = datetime.strptime(b["Заезд"], "%d.%m.%Y").date()
         dt_out = datetime.strptime(b["Выезд"], "%d.%m.%Y").date()
@@ -224,32 +232,34 @@ def is_room_free_for_dates(room_num, d_in, d_out, bookings):
     for b in bookings:
         if str(b.get("Номер")) != str(room_num):
             continue
-        s = norm_status(b.get("Статус", ""))
-        if s == _N_CLEANED or s == _N_CANCELLED or s.startswith(norm_status("Отменено")):
+        status_raw = b.get("Статус", "")
+        pay_status_raw = b.get("Статус оплаты", "")
+        if is_cancelled_text(status_raw) or is_cancelled_text(pay_status_raw):
             continue
         try:
             b_in = datetime.strptime(b["Заезд"], "%d.%m.%Y").date()
             b_out = datetime.strptime(b["Выезд"], "%d.%m.%Y").date()
             if d_in < b_out and d_out > b_in:
-                logger.info(f"is_room_free_for_dates: №{room_num} ЗАНЯТ — статус='{s}' гость='{b.get('Гость')}' {b_in}->{b_out}")
+                logger.info(f"is_room_free_for_dates: №{room_num} ЗАНЯТ — статус='{status_raw}' гость='{b.get('Гость')}' {b_in}->{b_out}")
                 return False
         except Exception:
             pass
     return True
 
 def find_all_bookings(room_num):
-    """Возвращает список (row_index, booking_dict) для ВСЕХ активных броней номера, хронологически"""
+    """Возвращает список (row_index, booking_dict) для ВСЕХ активных броней номера, хронологически.
+    Активна = НЕ отменена (проверяем и Статус, и Статус оплаты) и НЕ убрана."""
     records = get_bookings()
     result = []
     for i, r in enumerate(records):
         if str(r.get("Номер")) != str(room_num):
             continue
-        raw_status = r.get("Статус", "")
-        status_clean = norm_status(raw_status)
-        is_final_inactive = (status_clean == _N_CLEANED or status_clean == _N_CANCELLED or
-                             status_clean.startswith(norm_status("Отменено")))
-        logger.info(f"find_all_bookings: №{room_num} row={i+2} гость='{r.get('Гость')}' raw_status='{raw_status}' normalized='{status_clean}' is_final_inactive={is_final_inactive}")
-        if not is_final_inactive:
+        status_raw = r.get("Статус", "")
+        pay_status_raw = r.get("Статус оплаты", "")
+        cancelled = is_cancelled_text(status_raw) or is_cancelled_text(pay_status_raw)
+        cleaned = is_cleaned_text(status_raw)
+        logger.info(f"find_all_bookings: №{room_num} row={i+2} гость='{r.get('Гость')}' статус='{status_raw}' статус_оплаты='{pay_status_raw}' cancelled={cancelled} cleaned={cleaned}")
+        if not cancelled and not cleaned:
             result.append((i + 2, r))
     try:
         result.sort(key=lambda x: datetime.strptime(x[1]["Заезд"], "%d.%m.%Y"))
@@ -336,7 +346,9 @@ def find_exact_row(booking):
     return None
 
 def cancel_booking(row, booking, kept_amount=0):
-    """Отмена брони. kept_amount - сколько удержали (0 = полный возврат задатка)"""
+    """Отмена брони. kept_amount - сколько удержали (0 = полный возврат задатка).
+    Полностью 'обнуляет' бронь так, чтобы бот её больше никогда не считал активной:
+    переименовывает гостя с пометкой ОТМЕНЕНО, обнуляет суммы, ставит статус."""
     ws = get_ws()
     if not ws:
         logger.error("cancel_booking: не удалось получить worksheet")
@@ -344,7 +356,6 @@ def cancel_booking(row, booking, kept_amount=0):
     # Защита от рассинхрона: проверяем что row реально соответствует этой брони
     try:
         actual = ws.row_values(row)
-        # actual[2]=Гость(col3), actual[4]=Заезд(col5), actual[5]=Выезд(col6) — индексы с 0
         if len(actual) >= 6 and (actual[2] != booking.get("Гость") or actual[4] != booking.get("Заезд")):
             logger.warning(f"cancel_booking: row {row} не совпадает с брони {booking.get('Гость')}, ищу точную строку")
             exact_row = find_exact_row(booking)
@@ -357,22 +368,29 @@ def cancel_booking(row, booking, kept_amount=0):
         logger.error(f"cancel_booking row check error: {e}")
 
     logger.info(f"cancel_booking: row={row}, room={booking.get('Номер')}, guest={booking.get('Гость')}, kept={kept_amount}")
+    original_guest = booking.get("Гость", "")
+    # Очищаем календарь ДО изменения данных (нужны оригинальные даты)
+    clear_calendar(booking["Номер"], booking["Заезд"], booking["Выезд"])
+
+    ws.update_cell(row, 3, f"[ОТМЕНЕНО] {original_guest}")  # Гость — явная пометка
     ws.update_cell(row, 9, kept_amount)   # Итого = удержанная сумма
     ws.update_cell(row, 10, kept_amount)  # Задаток = удержанная сумма
-    ws.update_cell(row, 14, 0)  # Долг
+    ws.update_cell(row, 12, 0)   # Доплата
+    ws.update_cell(row, 14, 0)   # Долг
     ws.update_cell(row, 15, "Отменено" if kept_amount == 0 else "Отменено (частично)")
     ws.update_cell(row, 16, STATUS_CANCELLED)
-    # Проверяем что записалось
+
+    # Проверяем что записалось — читаем именно статус (самое важное поле)
     try:
-        check = ws.cell(row, 16).value
-        logger.info(f"cancel_booking: после записи статус в row={row} = '{check}'")
-        if check != STATUS_CANCELLED:
-            logger.error(f"cancel_booking: ЗАПИСЬ НЕ ПРОШЛА! Ожидали '{STATUS_CANCELLED}', получили '{check}'")
+        check_status = str(ws.cell(row, 16).value or "")
+        check_guest = str(ws.cell(row, 3).value or "")
+        logger.info(f"cancel_booking: после записи row={row} статус='{check_status}' гость='{check_guest}'")
+        if not is_cancelled_text(check_status):
+            logger.error(f"cancel_booking: ЗАПИСЬ НЕ ПРОШЛА! статус='{check_status}'")
             return False
     except Exception as e:
         logger.error(f"cancel_booking verify error: {e}")
         return False
-    clear_calendar(booking["Номер"], booking["Заезд"], booking["Выезд"])
     return True
 
 def add_payment(row, booking, amount, method):
@@ -1209,27 +1227,72 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         row = data["edit_row"]
         booking = data["edit_booking"]
         old_room = booking["Номер"]
-        # Проверяем, что новый номер свободен на эти даты (если это другой номер)
-        if new_room != old_room:
-            bookings = get_bookings()
-            try:
-                d_in = datetime.strptime(booking["Заезд"], "%d.%m.%Y").date()
-                d_out = datetime.strptime(booking["Выезд"], "%d.%m.%Y").date()
-            except Exception:
-                d_in = d_out = None
-            if d_in and not is_room_free_for_dates(new_room, d_in, d_out, bookings):
-                await q.edit_message_text(
-                    f"❌ *№{new_room} занят* на эти даты ({booking['Заезд']}→{booking['Выезд']})!\n\nВыбери другой номер:",
-                    reply_markup=all_rooms_kb("efroom"), parse_mode="Markdown")
-                return
-            # Очищаем календарь старого номера, переносим на новый
-            clear_calendar(old_room, booking["Заезд"], booking["Выезд"])
-            update_cell_ws(row, 2, new_room)  # колонка "Номер"
-            s = get_room_status(booking)
-            update_calendar(new_room, booking["Гость"], booking["Заезд"], booking["Выезд"], s)
+        if new_room == old_room:
+            clear(uid)
+            await q.edit_message_text(f"Это и так номер №{old_room}, ничего не поменялось.", reply_markup=back_kb())
+            return
+
+        bookings = get_bookings()
+        try:
+            d_in = datetime.strptime(booking["Заезд"], "%d.%m.%Y").date()
+            d_out = datetime.strptime(booking["Выезд"], "%d.%m.%Y").date()
+        except Exception:
+            d_in = d_out = None
+
+        if d_in and not is_room_free_for_dates(new_room, d_in, d_out, bookings):
+            # Номер занят — предлагаем обменять местами или отменить
+            update_data(uid, "swap_new_room", new_room)
+            update_data(uid, "swap_old_room", old_room)
+            other_row, other_booking = find_booking(new_room)
+            other_guest = other_booking["Гость"] if other_booking else "?"
+            await q.edit_message_text(
+                f"❌ *№{new_room} занят* на эти даты ({booking['Заезд']}→{booking['Выезд']})!\n"
+                f"Там сейчас: 👤 {other_guest}\n\n"
+                f"Что делаем?",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(f"🔄 Поменять местами с №{new_room}", callback_data="efroom_swap_confirm")],
+                    [InlineKeyboardButton("◀️ Выбрать другой номер", callback_data="ef_room")],
+                    [InlineKeyboardButton("❌ Не менять", callback_data="menu")],
+                ]), parse_mode="Markdown")
+            return
+
+        # Свободен — переносим как обычно
+        clear_calendar(old_room, booking["Заезд"], booking["Выезд"])
+        update_cell_ws(row, 2, new_room)  # колонка "Номер"
+        s = get_room_status(booking)
+        update_calendar(new_room, booking["Гость"], booking["Заезд"], booking["Выезд"], s)
         clear(uid)
         await q.edit_message_text(
             f"✅ *Номер изменён!*\n\n👤 {booking['Гость']}\n🏠 №{old_room} → №{new_room}",
+            reply_markup=back_kb(), parse_mode="Markdown")
+        return
+
+    if d == "efroom_swap_confirm":
+        data = get_data(uid)
+        old_room = data["swap_old_room"]
+        new_room = data["swap_new_room"]
+        row1 = data["edit_row"]
+        booking1 = data["edit_booking"]
+        row2, booking2 = find_booking(new_room)
+        if not booking2:
+            await q.edit_message_text("⚠️ Вторая бронь не найдена, обмен отменён.", reply_markup=back_kb())
+            return
+        # Очищаем оба места в календаре
+        clear_calendar(old_room, booking1["Заезд"], booking1["Выезд"])
+        clear_calendar(new_room, booking2["Заезд"], booking2["Выезд"])
+        # Меняем номера местами в таблице
+        update_cell_ws(row1, 2, new_room)
+        update_cell_ws(row2, 2, old_room)
+        # Перекрашиваем календарь на новых местах
+        s1 = get_room_status(booking1)
+        s2 = get_room_status(booking2)
+        update_calendar(new_room, booking1["Гость"], booking1["Заезд"], booking1["Выезд"], s1)
+        update_calendar(old_room, booking2["Гость"], booking2["Заезд"], booking2["Выезд"], s2)
+        clear(uid)
+        await q.edit_message_text(
+            f"✅ *Номера обменены!*\n\n"
+            f"👤 {booking1['Гость']}: №{old_room} → №{new_room}\n"
+            f"👤 {booking2['Гость']}: №{new_room} → №{old_room}",
             reply_markup=back_kb(), parse_mode="Markdown")
         return
 
@@ -1894,7 +1957,7 @@ async def send_deposit_reminders(app):
 
 def sync_statuses_daily():
     """Раз в сутки проверяет статусы. МАКСИМАЛЬНО консервативно — никогда не трогает
-    Отменён/Убрано/Отменено, и при любой неопределённости лучше ничего не делает."""
+    отменённые или убранные брони, и при любой неопределённости лучше ничего не делает."""
     import time
     # Первый запуск откладываем на 60 секунд, чтобы дать боту стабильно подняться
     time.sleep(60)
@@ -1908,17 +1971,9 @@ def sync_statuses_daily():
                     row = i + 2
                     current_status_raw = str(r.get("Статус", "")).strip()
                     pay_status_raw = str(r.get("Статус оплаты", "")).strip()
-                    current_status = norm_status(current_status_raw)
-                    pay_status = norm_status(pay_status_raw)
 
-                    # ЗАЩИТА: если ЛЮБОЕ из двух полей похоже на "отменено/отменён/убрано" — пропускаем
-                    cancelled_words = [norm_status("Отменён"), norm_status("Отменено"), norm_status("Отменено (частично)")]
-                    is_final = (
-                        current_status == _N_CLEANED or
-                        any(current_status.startswith(w) for w in cancelled_words) or
-                        any(pay_status.startswith(w) for w in cancelled_words)
-                    )
-                    if is_final:
+                    # ЗАЩИТА: если ЛЮБОЕ из двух полей похоже на "отменено/убрано" — пропускаем навсегда
+                    if is_cancelled_text(current_status_raw) or is_cancelled_text(pay_status_raw) or is_cleaned_text(current_status_raw):
                         continue
 
                     try:
@@ -1934,12 +1989,10 @@ def sync_statuses_daily():
 
                         if current_status_raw != correct_status:
                             # Доп. проверка прямо перед записью — перечитываем именно эту ячейку
-                            live_check = norm_status(ws.cell(row, 16).value)
-                            live_pay_check = norm_status(ws.cell(row, 15).value)
-                            if (any(live_check.startswith(w) for w in cancelled_words) or
-                                any(live_pay_check.startswith(w) for w in cancelled_words) or
-                                live_check == _N_CLEANED):
-                                logger.warning(f"sync: row={row} на самом деле уже финальный ('{live_check}'/'{live_pay_check}'), пропускаю")
+                            live_status = str(ws.cell(row, 16).value or "")
+                            live_pay = str(ws.cell(row, 15).value or "")
+                            if is_cancelled_text(live_status) or is_cancelled_text(live_pay) or is_cleaned_text(live_status):
+                                logger.warning(f"sync: row={row} на самом деле уже финальный ('{live_status}'/'{live_pay}'), пропускаю")
                                 continue
                             ws.update_cell(row, 16, correct_status)
                             if correct_status == STATUS_OCCUPIED:
