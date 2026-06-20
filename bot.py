@@ -858,7 +858,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ===== ОПЛАТА =====
     if d == "payment":
         bookings = get_bookings()
-        with_debt = [b for b in bookings if get_room_status(b) in [STATUS_OCCUPIED, STATUS_BOOKED] and int(b.get("Долг", 0)) > 0]
+        with_debt = [b for b in bookings if get_room_status(b) not in [STATUS_CANCELLED] and int(b.get("Долг", 0)) > 0]
         if not with_debt:
             await q.edit_message_text("✅ Все долги оплачены!", reply_markup=back_kb())
             return
@@ -1719,21 +1719,34 @@ async def send_deposit_reminders(app):
             logger.error(f"deposit reminder error: {e}")
 
 def sync_statuses_daily():
-    """При старте сразу синхронизирует, потом раз в сутки"""
+    """Раз в сутки проверяет статусы. МАКСИМАЛЬНО консервативно — никогда не трогает
+    Отменён/Убрано/Отменено, и при любой неопределённости лучше ничего не делает."""
     import time
+    # Первый запуск откладываем на 60 секунд, чтобы дать боту стабильно подняться
+    time.sleep(60)
     while True:
         try:
             ws = get_ws()
             if ws:
                 records = ws.get_all_records()
+                logger.info(f"sync_statuses_daily: проверяю {len(records)} записей")
                 for i, r in enumerate(records):
                     row = i + 2
-                    current_status_raw = r.get("Статус", "")
+                    current_status_raw = str(r.get("Статус", "")).strip()
+                    pay_status_raw = str(r.get("Статус оплаты", "")).strip()
                     current_status = norm_status(current_status_raw)
-                    is_final = (current_status == _N_CLEANED or current_status == _N_CANCELLED or
-                                current_status.startswith(norm_status("Отменено")))
+                    pay_status = norm_status(pay_status_raw)
+
+                    # ЗАЩИТА: если ЛЮБОЕ из двух полей похоже на "отменено/отменён/убрано" — пропускаем
+                    cancelled_words = [norm_status("Отменён"), norm_status("Отменено"), norm_status("Отменено (частично)")]
+                    is_final = (
+                        current_status == _N_CLEANED or
+                        any(current_status.startswith(w) for w in cancelled_words) or
+                        any(pay_status.startswith(w) for w in cancelled_words)
+                    )
                     if is_final:
                         continue
+
                     try:
                         today = date.today()
                         dt_in = datetime.strptime(r["Заезд"], "%d.%m.%Y").date()
@@ -1744,16 +1757,25 @@ def sync_statuses_daily():
                             correct_status = STATUS_OCCUPIED
                         else:
                             correct_status = STATUS_CLEAN_NEEDED
+
                         if current_status_raw != correct_status:
+                            # Доп. проверка прямо перед записью — перечитываем именно эту ячейку
+                            live_check = norm_status(ws.cell(row, 16).value)
+                            live_pay_check = norm_status(ws.cell(row, 15).value)
+                            if (any(live_check.startswith(w) for w in cancelled_words) or
+                                any(live_pay_check.startswith(w) for w in cancelled_words) or
+                                live_check == _N_CLEANED):
+                                logger.warning(f"sync: row={row} на самом деле уже финальный ('{live_check}'/'{live_pay_check}'), пропускаю")
+                                continue
                             ws.update_cell(row, 16, correct_status)
                             if correct_status == STATUS_OCCUPIED:
                                 update_calendar(r["Номер"], r["Гость"], r["Заезд"], r["Выезд"], STATUS_OCCUPIED)
                             elif correct_status == STATUS_CLEAN_NEEDED:
                                 clear_calendar(r["Номер"], r["Заезд"], r["Выезд"])
-                            logger.info(f"Синхронизация: №{r['Номер']} {current_status_raw} -> {correct_status}")
+                            logger.info(f"Синхронизация: row={row} №{r['Номер']} '{current_status_raw}' -> '{correct_status}'")
                     except Exception as e:
-                        logger.error(f"Sync row error: {e}")
-            logger.info("Синхронизация статусов завершена")
+                        logger.error(f"Sync row error (row={row}): {e}")
+            logger.info("sync_statuses_daily: цикл завершён, жду 24 часа")
         except Exception as e:
             logger.error(f"sync_statuses_daily error: {e}")
         time.sleep(86400)  # 24 часа
