@@ -532,6 +532,7 @@ def icon_for(s):
 # ===== КЛАВИАТУРЫ =====
 def main_kb():
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📅 Сегодня", callback_data="today")],
         [InlineKeyboardButton("🔎 Подобрать номер", callback_data="search")],
         [InlineKeyboardButton("🔵 Бронь", callback_data="book"),
          InlineKeyboardButton("💰 Принять оплату", callback_data="payment")],
@@ -691,6 +692,11 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if d == "menu":
         clear(uid)
         await q.edit_message_text("🏠 *Управление квартирами*\n\nВыбери действие:", reply_markup=main_kb(), parse_mode="Markdown")
+        return
+
+    # ===== СЕГОДНЯ =====
+    if d == "today":
+        await show_today(q)
         return
 
     # ===== ПОДОБРАТЬ НОМЕР =====
@@ -1484,7 +1490,65 @@ async def show_cancel_confirm(q, uid, num, row, booking):
             [InlineKeyboardButton("◀️ Назад", callback_data="menu")]
         ]), parse_mode="Markdown")
 
-async def show_info_list(q):
+async def show_today(q):
+    """Показывает актуальную инфу на сегодня: кто заезжает, кто выезжает, какие номера свободны."""
+    bookings = get_bookings()
+    today = date.today()
+    today_str = today.strftime("%d.%m.%Y")
+
+    arriving = []   # заезжают сегодня
+    departing = []  # выезжают сегодня
+    occupied_nums = set()
+
+    for b in bookings:
+        status_raw = str(b.get("Статус", "")).strip()
+        pay_raw = str(b.get("Статус оплаты", "")).strip()
+        if is_cancelled_text(status_raw) or is_cancelled_text(pay_raw):
+            continue
+        try:
+            d_in = datetime.strptime(b["Заезд"], "%d.%m.%Y").date()
+            d_out = datetime.strptime(b["Выезд"], "%d.%m.%Y").date()
+        except Exception:
+            continue
+
+        if d_in == today:
+            arriving.append(b)
+        if d_out == today:
+            departing.append(b)
+        if d_in <= today < d_out:
+            occupied_nums.add(str(b["Номер"]))
+
+    free_nums = [n for n in ROOMS if n != 14 and str(n) not in occupied_nums]
+    # Номера, которые освобождаются сегодня (выезд сегодня) тоже можно считать скоро свободными,
+    # но физически до конца дня там может быть гость — оставляем как "выезд сегодня" отдельно.
+
+    lines = [f"📅 *Сегодня — {today_str}*\n"]
+
+    lines.append("🔵 *Заезжают сегодня:*")
+    if arriving:
+        for b in sorted(arriving, key=lambda x: int(x["Номер"])):
+            lines.append(f"  №{b['Номер']} / {b['Гость']}")
+    else:
+        lines.append("  — никто")
+
+    lines.append("\n🚪 *Выезжают сегодня:*")
+    if departing:
+        for b in sorted(departing, key=lambda x: int(x["Номер"])):
+            lines.append(f"  №{b['Номер']} / {b['Гость']}")
+    else:
+        lines.append("  — никто")
+
+    lines.append("\n⬜ *Свободные номера:*")
+    if free_nums:
+        for n in sorted(free_nums):
+            lines.append(f"  №{n}")
+    else:
+        lines.append("  — все заняты")
+
+    text = "\n".join(lines)
+    await q.edit_message_text(text, reply_markup=back_kb(), parse_mode="Markdown")
+
+
     bookings = get_bookings()
     cleaning_statuses = get_all_cleaning_statuses()
     status_map = {}
