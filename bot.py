@@ -1254,7 +1254,7 @@ async def button_inner(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text(f"✏️ Введи новое {prompts.get(field, field)}:")
         return
 
-    if d.startswith("efroom_"):
+    if d.startswith("efroom_") and d != "efroom_swap_confirm":
         new_room = int(d.split("_")[-1])
         data = get_data(uid)
         row = data["edit_row"]
@@ -1316,14 +1316,18 @@ async def button_inner(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if d == "efroom_swap_confirm":
         data = get_data(uid)
-        old_room = data["swap_old_room"]
-        new_room = data["swap_new_room"]
-        row1 = data["edit_row"]
-        booking1 = data["edit_booking"]
+        old_room = data.get("swap_old_room")
+        new_room = data.get("swap_new_room")
+        row1 = data.get("edit_row")
+        booking1 = data.get("edit_booking")
         row2 = data.get("swap_conflict_row")
         booking2 = data.get("swap_conflict_booking")
-        if not booking2 or not row2:
-            await q.edit_message_text("⚠️ Вторая бронь не найдена, обмен отменён.", reply_markup=back_kb())
+        if not all([old_room, new_room, row1, booking1, row2, booking2]):
+            clear(uid)
+            await q.edit_message_text(
+                "⚠️ Данные сессии устарели (возможно прошло много времени или был нажат /start).\n\n"
+                "Начни заново через «Изменить данные».",
+                reply_markup=back_kb())
             return
         # Очищаем оба места в календаре
         clear_calendar(old_room, booking1["Заезд"], booking1["Выезд"])
