@@ -1273,14 +1273,28 @@ async def button_inner(update: Update, context: ContextTypes.DEFAULT_TYPE):
             d_in = d_out = None
 
         if d_in and not is_room_free_for_dates(new_room, d_in, d_out, bookings):
-            # Номер занят — предлагаем обменять местами или отменить
+            # Номер занят — найдём ИМЕННО ту бронь, которая реально пересекается по датам
+            conflicting_booking = None
+            conflicting_row = None
+            for row2, b2 in find_all_bookings(new_room):
+                try:
+                    b2_in = datetime.strptime(b2["Заезд"], "%d.%m.%Y").date()
+                    b2_out = datetime.strptime(b2["Выезд"], "%d.%m.%Y").date()
+                    if d_in < b2_out and d_out > b2_in:
+                        conflicting_booking = b2
+                        conflicting_row = row2
+                        break
+                except Exception:
+                    continue
             update_data(uid, "swap_new_room", new_room)
             update_data(uid, "swap_old_room", old_room)
-            other_row, other_booking = find_booking(new_room)
-            other_guest = other_booking["Гость"] if other_booking else "?"
+            update_data(uid, "swap_conflict_row", conflicting_row)
+            update_data(uid, "swap_conflict_booking", conflicting_booking)
+            other_guest = safe_md(conflicting_booking["Гость"]) if conflicting_booking else "?"
+            other_dates = f"{conflicting_booking['Заезд']}→{conflicting_booking['Выезд']}" if conflicting_booking else ""
             await q.edit_message_text(
                 f"❌ *№{new_room} занят* на эти даты ({booking['Заезд']}→{booking['Выезд']})!\n"
-                f"Там сейчас: 👤 {other_guest}\n\n"
+                f"Там сейчас: 👤 {other_guest} ({other_dates})\n\n"
                 f"Что делаем?",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton(f"🔄 Поменять местами с №{new_room}", callback_data="efroom_swap_confirm")],
@@ -1306,8 +1320,9 @@ async def button_inner(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_room = data["swap_new_room"]
         row1 = data["edit_row"]
         booking1 = data["edit_booking"]
-        row2, booking2 = find_booking(new_room)
-        if not booking2:
+        row2 = data.get("swap_conflict_row")
+        booking2 = data.get("swap_conflict_booking")
+        if not booking2 or not row2:
             await q.edit_message_text("⚠️ Вторая бронь не найдена, обмен отменён.", reply_markup=back_kb())
             return
         # Очищаем оба места в календаре
