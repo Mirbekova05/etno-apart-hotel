@@ -372,7 +372,7 @@ def cancel_booking(row, booking, kept_amount=0):
     # Очищаем календарь ДО изменения данных (нужны оригинальные даты)
     clear_calendar(booking["Номер"], booking["Заезд"], booking["Выезд"])
 
-    ws.update_cell(row, 3, f"[ОТМЕНЕНО] {original_guest}")  # Гость — явная пометка
+    ws.update_cell(row, 3, f"ОТМЕНЕНО - {original_guest}")  # Гость — явная пометка, без скобок (ломают Markdown)
     ws.update_cell(row, 9, kept_amount)   # Итого = удержанная сумма
     ws.update_cell(row, 10, kept_amount)  # Задаток = удержанная сумма
     ws.update_cell(row, 12, 0)   # Доплата
@@ -524,6 +524,15 @@ def update_data(uid, k, v):
 def clear(uid):
     user_states.pop(uid, None)
     user_data.pop(uid, None)
+
+def safe_md(text):
+    """Экранирует символы, которые ломают Markdown-парсинг Telegram (_, *, [, ], `)."""
+    if text is None:
+        return ""
+    s = str(text)
+    for ch in ["_", "*", "[", "]", "`"]:
+        s = s.replace(ch, "\\" + ch)
+    return s
 
 def icon_for(s):
     return {STATUS_OCCUPIED: "🔴", STATUS_BOOKED: "🔵", STATUS_CLEAN_NEEDED: "🧹",
@@ -684,8 +693,26 @@ async def reset_cleaning_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"⚠️ Ошибка: {e}")
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Безопасная обёртка: что бы ни произошло внутри обработки клика,
+    бот ВСЕГДА ответит (даже если просто сообщением об ошибке), а не молча зависнет."""
     q = update.callback_query
-    await q.answer()
+    try:
+        await q.answer()
+    except Exception as e:
+        logger.error(f"button: q.answer() error: {e}")
+    try:
+        await button_inner(update, context)
+    except Exception as e:
+        logger.error(f"button: НЕПЕРЕХВАЧЕННАЯ ОШИБКА в button_inner: {e}", exc_info=True)
+        try:
+            await q.edit_message_text(
+                "⚠️ Произошла ошибка. Нажми /start и попробуй снова.",
+                reply_markup=back_kb())
+        except Exception as e2:
+            logger.error(f"button: не удалось даже показать сообщение об ошибке: {e2}")
+
+async def button_inner(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
     uid = q.from_user.id
     d = q.data
 
@@ -796,7 +823,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update_calendar(booking["Номер"], booking["Гость"], booking["Заезд"], booking["Выезд"], STATUS_OCCUPIED)
         clear(uid)
         await q.edit_message_text(
-            f"✅ *№{booking['Номер']} заселён!*\n\n👤 {booking['Гость']}\n⚠️ Долг: *{int(booking['Долг']):,} сом*",
+            f"✅ *№{booking['Номер']} заселён!*\n\n👤 {safe_md(booking['Гость'])}\n⚠️ Долг: *{int(booking['Долг']):,} сом*",
             reply_markup=back_kb(), parse_mode="Markdown")
         return
 
@@ -1036,7 +1063,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update_data(uid, "pay_booking", booking)
             set_state(uid, "pay_amount")
             await q.edit_message_text(
-                f"💰 №{num} — {booking['Гость']}\n"
+                f"💰 №{num} — {safe_md(booking['Гость'])}\n"
                 f"💰 Итого: *{int(booking['Итого']):,} сом*\n"
                 f"✅ Задаток: *{int(booking['Задаток']):,} сом*\n"
                 f"⚠️ Долг: *{int(booking['Долг']):,} сом*\n\nВведи сумму оплаты:",
@@ -1055,7 +1082,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update_data(uid, "pay_booking", booking)
         set_state(uid, "pay_amount")
         await q.edit_message_text(
-            f"💰 №{num} — {booking['Гость']}\n"
+            f"💰 №{num} — {safe_md(booking['Гость'])}\n"
             f"💰 Итого: *{int(booking['Итого']):,} сом*\n"
             f"✅ Задаток: *{int(booking['Задаток']):,} сом*\n"
             f"⚠️ Долг: *{int(booking['Долг']):,} сом*\n\nВведи сумму оплаты:",
@@ -1115,7 +1142,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text(f"Номер №{num} не найден или уже убран.", reply_markup=back_kb())
             return
         await q.edit_message_text(
-            f"🧹 *№{num} — {booking['Гость']}*\n\nСтатус уборки?",
+            f"🧹 *№{num} — {safe_md(booking['Гость'])}*\n\nСтатус уборки?",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("✅ Убрано", callback_data=f"clean_done_{num}")],
                 [InlineKeyboardButton("❌ Не убрано", callback_data=f"clean_skip_{num}")],
@@ -1269,7 +1296,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update_calendar(new_room, booking["Гость"], booking["Заезд"], booking["Выезд"], s)
         clear(uid)
         await q.edit_message_text(
-            f"✅ *Номер изменён!*\n\n👤 {booking['Гость']}\n🏠 №{old_room} → №{new_room}",
+            f"✅ *Номер изменён!*\n\n👤 {safe_md(booking['Гость'])}\n🏠 №{old_room} → №{new_room}",
             reply_markup=back_kb(), parse_mode="Markdown")
         return
 
@@ -1297,8 +1324,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clear(uid)
         await q.edit_message_text(
             f"✅ *Номера обменены!*\n\n"
-            f"👤 {booking1['Гость']}: №{old_room} → №{new_room}\n"
-            f"👤 {booking2['Гость']}: №{new_room} → №{old_room}",
+            f"👤 {safe_md(booking1['Гость'])}: №{old_room} → №{new_room}\n"
+            f"👤 {safe_md(booking2['Гость'])}: №{new_room} → №{old_room}",
             reply_markup=back_kb(), parse_mode="Markdown")
         return
 
@@ -1341,7 +1368,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         row, booking = all_b[0]
         cancel_booking(row, booking, kept_amount=0)
         await q.edit_message_text(
-            f"❌ *Бронь №{num} отменена*\n\n👤 {booking['Гость']}",
+            f"❌ *Бронь №{num} отменена*\n\n👤 {safe_md(booking['Гость'])}",
             reply_markup=back_kb(), parse_mode="Markdown")
         return
 
@@ -1408,7 +1435,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clear(uid)
         if success:
             await q.edit_message_text(
-                f"❌ *Бронь №{booking['Номер']} отменена*\n\n👤 {booking['Гость']}\n💰 Задаток возвращён полностью",
+                f"❌ *Бронь №{booking['Номер']} отменена*\n\n👤 {safe_md(booking['Гость'])}\n💰 Задаток возвращён полностью",
                 reply_markup=back_kb(), parse_mode="Markdown")
         else:
             await q.edit_message_text(
@@ -1435,7 +1462,7 @@ async def show_checkin_booking(q, uid, row, booking):
     kb.append([InlineKeyboardButton("◀️ Меню", callback_data="menu")])
     await q.edit_message_text(
         f"✅ *Заселение №{booking['Номер']}*\n\n"
-        f"👤 {booking['Гость']} ({booking['Людей']} чел.)\n"
+        f"👤 {safe_md(booking['Гость'])} ({booking['Людей']} чел.)\n"
         f"📅 {booking['Заезд']} → {booking['Выезд']}\n"
         f"━━━━━━━━━━━━\n"
         f"💰 Итого: *{int(booking['Итого']):,} сом*\n"
@@ -1454,7 +1481,7 @@ async def show_checkout_booking(q, uid, row, booking):
     kb.append([InlineKeyboardButton("🚪 Выселить без оплаты", callback_data="co_confirm")])
     kb.append([InlineKeyboardButton("◀️ Меню", callback_data="menu")])
     await q.edit_message_text(
-        f"🚪 *Выселение №{booking['Номер']}*\n\n👤 {booking['Гость']} ({booking['Людей']} чел.)\n"
+        f"🚪 *Выселение №{booking['Номер']}*\n\n👤 {safe_md(booking['Гость'])} ({booking['Людей']} чел.)\n"
         f"📅 {booking['Заезд']} → {booking['Выезд']}\n━━━━━━━━━━━━\n"
         f"💰 Итого: *{int(booking['Итого']):,} сом*\n"
         f"✅ Задаток: *{int(booking['Задаток']):,} сом* ({booking.get('Способ задатка','—')})\n"
@@ -1467,7 +1494,7 @@ async def show_edit_booking(q, uid, num, row, booking):
     update_data(uid, "edit_room", num)
     s = get_room_status(booking)
     await q.edit_message_text(
-        f"✏️ *{icon_for(s)} №{num} — {booking['Гость']}*\n\n"
+        f"✏️ *{icon_for(s)} №{num} — {safe_md(booking['Гость'])}*\n\n"
         f"📅 {booking['Заезд']} → {booking['Выезд']}\n"
         f"👥 {booking['Людей']} чел. | 💰 {int(booking['Итого']):,} сом\n\n"
         f"Что хочешь изменить?",
@@ -1479,7 +1506,7 @@ async def show_cancel_confirm(q, uid, num, row, booking):
     prepay = int(booking.get("Задаток", 0))
     await q.edit_message_text(
         f"❌ *Отмена брони №{num}*\n\n"
-        f"👤 {booking['Гость']} ({booking['Людей']} чел.)\n"
+        f"👤 {safe_md(booking['Гость'])} ({booking['Людей']} чел.)\n"
         f"📅 {booking['Заезд']} → {booking['Выезд']}\n"
         f"💰 Итого: *{int(booking['Итого']):,} сом*\n"
         f"✅ Задаток внесён: *{prepay:,} сом*\n\n"
@@ -1492,114 +1519,134 @@ async def show_cancel_confirm(q, uid, num, row, booking):
 
 async def show_today(q):
     """Показывает актуальную инфу на сегодня: кто заезжает, кто выезжает, какие номера свободны."""
-    bookings = get_bookings()
-    today = date.today()
-    today_str = today.strftime("%d.%m.%Y")
+    try:
+        bookings = get_bookings()
+        today = date.today()
+        today_str = today.strftime("%d.%m.%Y")
 
-    arriving = []   # заезжают сегодня
-    departing = []  # выезжают сегодня
-    occupied_nums = set()
+        arriving = []   # заезжают сегодня
+        departing = []  # выезжают сегодня
+        occupied_nums = set()
 
-    for b in bookings:
-        status_raw = str(b.get("Статус", "")).strip()
-        pay_raw = str(b.get("Статус оплаты", "")).strip()
-        if is_cancelled_text(status_raw) or is_cancelled_text(pay_raw):
-            continue
+        for b in bookings:
+            status_raw = str(b.get("Статус", "")).strip()
+            pay_raw = str(b.get("Статус оплаты", "")).strip()
+            if is_cancelled_text(status_raw) or is_cancelled_text(pay_raw):
+                continue
+            try:
+                d_in = datetime.strptime(b["Заезд"], "%d.%m.%Y").date()
+                d_out = datetime.strptime(b["Выезд"], "%d.%m.%Y").date()
+            except Exception:
+                continue
+
+            if d_in == today:
+                arriving.append(b)
+            if d_out == today:
+                departing.append(b)
+            if d_in <= today < d_out:
+                occupied_nums.add(str(b["Номер"]))
+
+        free_nums = [n for n in ROOMS if n != 14 and str(n) not in occupied_nums]
+
+        lines = [f"📅 *Сегодня — {today_str}*\n"]
+
+        lines.append("🔵 *Заезжают сегодня:*")
+        if arriving:
+            for b in sorted(arriving, key=lambda x: int(x["Номер"])):
+                lines.append(f"  №{b['Номер']} / {safe_md(b['Гость'])}")
+        else:
+            lines.append("  — никто")
+
+        lines.append("\n🚪 *Выезжают сегодня:*")
+        if departing:
+            for b in sorted(departing, key=lambda x: int(x["Номер"])):
+                lines.append(f"  №{b['Номер']} / {safe_md(b['Гость'])}")
+        else:
+            lines.append("  — никто")
+
+        lines.append("\n⬜ *Свободные номера:*")
+        if free_nums:
+            for n in sorted(free_nums):
+                lines.append(f"  №{n}")
+        else:
+            lines.append("  — все заняты")
+
+        text = "\n".join(lines)
+        await q.edit_message_text(text, reply_markup=back_kb(), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"show_today error: {e}")
         try:
-            d_in = datetime.strptime(b["Заезд"], "%d.%m.%Y").date()
-            d_out = datetime.strptime(b["Выезд"], "%d.%m.%Y").date()
+            await q.edit_message_text("⚠️ Ошибка при загрузке. Попробуй ещё раз.", reply_markup=back_kb())
         except Exception:
-            continue
+            pass
 
-        if d_in == today:
-            arriving.append(b)
-        if d_out == today:
-            departing.append(b)
-        if d_in <= today < d_out:
-            occupied_nums.add(str(b["Номер"]))
-
-    free_nums = [n for n in ROOMS if n != 14 and str(n) not in occupied_nums]
-    # Номера, которые освобождаются сегодня (выезд сегодня) тоже можно считать скоро свободными,
-    # но физически до конца дня там может быть гость — оставляем как "выезд сегодня" отдельно.
-
-    lines = [f"📅 *Сегодня — {today_str}*\n"]
-
-    lines.append("🔵 *Заезжают сегодня:*")
-    if arriving:
-        for b in sorted(arriving, key=lambda x: int(x["Номер"])):
-            lines.append(f"  №{b['Номер']} / {b['Гость']}")
-    else:
-        lines.append("  — никто")
-
-    lines.append("\n🚪 *Выезжают сегодня:*")
-    if departing:
-        for b in sorted(departing, key=lambda x: int(x["Номер"])):
-            lines.append(f"  №{b['Номер']} / {b['Гость']}")
-    else:
-        lines.append("  — никто")
-
-    lines.append("\n⬜ *Свободные номера:*")
-    if free_nums:
-        for n in sorted(free_nums):
-            lines.append(f"  №{n}")
-    else:
-        lines.append("  — все заняты")
-
-    text = "\n".join(lines)
-    await q.edit_message_text(text, reply_markup=back_kb(), parse_mode="Markdown")
-
-
-    bookings = get_bookings()
-    cleaning_statuses = get_all_cleaning_statuses()
-    status_map = {}
-    for b in bookings:
-        s = get_room_status(b)
-        n = str(b["Номер"])
-        if s == STATUS_FREE:
-            # Если выезд прошёл, смотрим — может быть номер ещё не убран
-            s = cleaning_statuses.get(n, STATUS_CLEANED)
-            if s == STATUS_CLEANED:
-                continue  # действительно свободен и чист — не считаем активным статусом
-        if s not in [STATUS_CLEANED, STATUS_CANCELLED]:
-            if n not in status_map:
-                status_map[n] = s
-    kb = []
-    row = []
-    lines = []
-    for num, info in ROOMS.items():
-        if num == 14:
-            continue
-        s = status_map.get(str(num), STATUS_FREE)
-        icon = icon_for(s)
-        type_name = info["name"].split("— ")[1] if "— " in info["name"] else info["name"]
-        lines.append(f"{icon} №{num} — {type_name}")
-        row.append(InlineKeyboardButton(f"{icon}№{num}", callback_data=f"info_room_{num}"))
-        if len(row) == 4:
+async def show_info_list(q):
+    try:
+        bookings = get_bookings()
+        cleaning_statuses = get_all_cleaning_statuses()
+        status_map = {}
+        for b in bookings:
+            s = get_room_status(b)
+            n = str(b["Номер"])
+            if s == STATUS_FREE:
+                # Если выезд прошёл, смотрим — может быть номер ещё не убран
+                s = cleaning_statuses.get(n, STATUS_CLEANED)
+                if s == STATUS_CLEANED:
+                    continue  # действительно свободен и чист — не считаем активным статусом
+            if s not in [STATUS_CLEANED, STATUS_CANCELLED]:
+                if n not in status_map:
+                    status_map[n] = s
+        kb = []
+        row = []
+        lines = []
+        for num, info in ROOMS.items():
+            if num == 14:
+                continue
+            s = status_map.get(str(num), STATUS_FREE)
+            icon = icon_for(s)
+            type_name = info["name"].split("— ")[1] if "— " in info["name"] else info["name"]
+            lines.append(f"{icon} №{num} — {type_name}")
+            row.append(InlineKeyboardButton(f"{icon}№{num}", callback_data=f"info_room_{num}"))
+            if len(row) == 4:
+                kb.append(row)
+                row = []
+        if row:
             kb.append(row)
-            row = []
-    if row:
-        kb.append(row)
-    kb.append([InlineKeyboardButton("◀️ Меню", callback_data="menu")])
-    text = "🔍 *Все номера:*\n\n" + "\n".join(lines)
-    await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+        kb.append([InlineKeyboardButton("◀️ Меню", callback_data="menu")])
+        text = "🔍 *Все номера:*\n\n" + "\n".join(lines)
+        await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"show_info_list error: {e}")
+        try:
+            await q.edit_message_text("⚠️ Ошибка при загрузке списка номеров. Попробуй ещё раз.", reply_markup=back_kb())
+        except Exception:
+            pass
 
 async def show_info_room(q, num):
-    room = ROOMS[num]
-    all_b = find_all_bookings(num)
-    if all_b:
-        lines = []
-        for row, b in all_b:
-            s = get_room_status(b)
-            icon = icon_for(s)
-            debt = int(b.get("Долг", 0))
-            debt_str = f" | Долг: {debt:,} сом ⚠️" if debt > 0 else " | ✅ Оплачено"
-            lines.append(f"{icon} {b['Заезд']}→{b['Выезд']} — *{b['Гость']}* ({b['Людей']} чел.){debt_str}")
-        text = f"🏠 *{room['name']}*\n\n" + "\n".join(lines)
-    else:
-        text = f"🟢 *{room['name']}*\n\nНет броней — номер свободен"
-    await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([
-        [InlineKeyboardButton("◀️ Все номера", callback_data="info")]
-    ]), parse_mode="Markdown")
+    try:
+        room = ROOMS[num]
+        all_b = find_all_bookings(num)
+        if all_b:
+            lines = []
+            for row, b in all_b:
+                s = get_room_status(b)
+                icon = icon_for(s)
+                debt = int(b.get("Долг", 0) or 0)
+                debt_str = f" | Долг: {debt:,} сом ⚠️" if debt > 0 else " | ✅ Оплачено"
+                guest = safe_md(b.get("Гость", ""))
+                lines.append(f"{icon} {b['Заезд']}→{b['Выезд']} — *{guest}* ({b['Людей']} чел.){debt_str}")
+            text = f"🏠 *{safe_md(room['name'])}*\n\n" + "\n".join(lines)
+        else:
+            text = f"🟢 *{safe_md(room['name'])}*\n\nНет броней — номер свободен"
+        await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("◀️ Все номера", callback_data="info")]
+        ]), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"show_info_room error: {e}")
+        try:
+            await q.edit_message_text(f"⚠️ Ошибка при показе №{num}. Попробуй ещё раз.", reply_markup=back_kb())
+        except Exception:
+            pass
 
 async def calc_total(q, uid, price_per_person):
     data = get_data(uid)
@@ -1621,6 +1668,16 @@ async def calc_total(q, uid, price_per_person):
         reply_markup=kb, parse_mode="Markdown")
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        await message_handler_inner(update, context)
+    except Exception as e:
+        logger.error(f"message_handler: НЕПЕРЕХВАЧЕННАЯ ОШИБКА: {e}", exc_info=True)
+        try:
+            await update.message.reply_text("⚠️ Произошла ошибка. Нажми /start и попробуй снова.")
+        except Exception:
+            pass
+
+async def message_handler_inner(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     state = get_state(uid)
     text = update.message.text.strip()
@@ -1963,7 +2020,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             clear(uid)
             await update.message.reply_text(
                 f"❌ *Бронь №{booking['Номер']} отменена*\n\n"
-                f"👤 {booking['Гость']}\n"
+                f"👤 {safe_md(booking['Гость'])}\n"
                 f"✂️ Удержано: *{kept:,} сом*\n"
                 f"💰 Возвращено гостю: *{returned:,} сом*",
                 reply_markup=back_kb(), parse_mode="Markdown")
@@ -2004,7 +2061,7 @@ async def send_deposit_reminders(app):
                 if s == STATUS_BOOKED and int(b.get("Задаток", 0)) == 0:
                     text = (
                         f"⏰ *Напоминание о задатке!*\n\n"
-                        f"🏠 №{b['Номер']} — {b['Гость']}\n"
+                        f"🏠 №{b['Номер']} — {safe_md(b['Гость'])}\n"
                         f"📅 {b['Заезд']} → {b['Выезд']}\n"
                         f"💰 Итого: {int(b['Итого']):,} сом\n"
                         f"⚠️ Задаток не получен!\n\n"
